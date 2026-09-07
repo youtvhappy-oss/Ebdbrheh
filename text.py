@@ -108,7 +108,6 @@ async def keep_alive_ping():
             except Exception as e:
                 print(f"⚠️ تعذر إرسال الإشارة: {e}")
 
-# قارئ ملفات مخصص لمتابعة نسبة الرفع
 class ProgressFileReader:
     def __init__(self, filename, callback):
         self.file = open(filename, 'rb')
@@ -126,7 +125,7 @@ class ProgressFileReader:
     def close(self):
         self.file.close()
 
-# 🚀 دالة الرفع إلى Fileditch مع إظهار النسبة المئوية والتقدم
+# 🚀 دالة الرفع إلى Fileditch مع إظهار النسبة المئوية
 async def upload_to_fileditch_with_progress(file_path, status_msg, loop):
     url = "https://new.fileditch.com/upload.php"
     start_time = time.time()
@@ -168,7 +167,6 @@ async def upload_to_fileditch_with_progress(file_path, status_msg, loop):
     else:
         raise Exception(response.get("error", "فشل الرفع إلى Fileditch."))
 
-# 🌐 معالج GoFile باستخدام Firefox الخفيف
 async def download_from_gofile(url):
     async with async_playwright() as p:
         browser = await p.firefox.launch(headless=True)
@@ -187,7 +185,6 @@ async def download_from_gofile(url):
         await browser.close()
         return file_path
 
-# 🌐 معالج WorkUpload باستخدام Firefox الخفيف
 async def download_from_workupload(url):
     async with async_playwright() as p:
         browser = await p.firefox.launch(headless=True)
@@ -206,7 +203,6 @@ async def download_from_workupload(url):
         await browser.close()
         return file_path
 
-# 📥 دالة التحميل المباشر مع النسبة المئوية
 async def download_direct(url, status_msg):
     file_name = os.path.join(DOWNLOAD_DIR, url.split("/")[-1].split("?")[0] or "downloaded_file.bin")
     session = requests.Session()
@@ -249,7 +245,6 @@ async def download_direct(url, status_msg):
                         
     return file_name
 
-# 🔘 لوحات التحكم بالزرار
 def get_main_keyboard(current_mode):
     btn1_text = "✅ رابط ⬅️ ملف (تليجرام)" if current_mode == "link_to_file" else "رابط ⬅️ ملف (تليجرام)"
     btn2_text = "✅ ملف ⬅️ رابط (Fileditch)" if current_mode == "file_to_link" else "ملف ⬅️ رابط (Fileditch)"
@@ -262,8 +257,7 @@ def get_main_keyboard(current_mode):
 
 def get_gdrive_options_keyboard():
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📥 تنزيل إلى Drive ثم التحويل لـ Fileditch", callback_data="gdrive_download_first")],
-        [InlineKeyboardButton("⚡ النقل المباشر من Google Drive إلى Fileditch", callback_data="gdrive_direct_fileditch")]
+        [InlineKeyboardButton("📥 تحويل Google Drive إلى Fileditch", callback_data="gdrive_process")]
     ])
     return keyboard
 
@@ -296,17 +290,15 @@ async def mode_callback(client, callback: CallbackQuery):
     )
     await callback.answer("تم حفظ الاختيار")
 
-# 📥 1. استقبال الروابط ومعالجتها
 @bot.on_message(filters.regex(r'https?://[^\s]+') & filters.private)
 async def handle_links(client, message: Message):
     mode = user_modes.get(message.chat.id, "link_to_file")
     url = message.text.strip()
 
-    # إذا كان في وضع "ملف ⬅️ رابط" وتم إرسال رابط Google Drive
     if mode == "file_to_link" and ("drive.google.com" in url or "docs.google.com" in url):
         pending_urls[message.chat.id] = url
         await message.reply_text(
-            "⚙️ **تم اكتشاف رابط Google Drive!**\nكيف ترغب في معالجة الملف للرفع إلى Fileditch؟",
+            "⚙️ **تم اكتشاف رابط Google Drive!**\nاضغط على الزر أدناه لبدء التنزيل من Drive والرفع لـ Fileditch.",
             reply_markup=get_gdrive_options_keyboard()
         )
         return
@@ -323,20 +315,22 @@ async def handle_links(client, message: Message):
         if "gofile.io" in url:
             await status_msg.edit_text("🦊 جاري تشغيل المتصفح الخفيف والتحميل من GoFile...")
             file_path = await download_from_gofile(url)
-
         elif "workupload.com" in url:
             await status_msg.edit_text("🦊 جاري تشغيل المتصفح الخفيف والتحميل من WorkUpload...")
             file_path = await download_from_workupload(url)
-
+        elif "drive.google.com" in url or "docs.google.com" in url:
+            await status_msg.edit_text("📥 جاري تنزيل الملف من Google Drive...")
+            output_path = os.path.join(DOWNLOAD_DIR, f"gdrive_{int(time.time())}.bin")
+            file_path = gdown.download(url, output_path, quiet=False, fuzzy=True)
         else:
             file_path = await download_direct(url, status_msg)
 
         if not file_path or not os.path.exists(file_path):
-            raise Exception("تعذر تنزيل الملف، يرجى التأكد من صحة الرابط.")
+            raise Exception("تعذر تنزيل الملف، يرجى التأكد من أن الرابط عام ومتاح.")
 
         local_size = os.path.getsize(file_path)
         if local_size > MAX_FILE_SIZE:
-            raise Exception(f"الملف كبير جداً ({humanbytes(local_size)}).")
+            raise Exception(f"الملف كبير جداً ({humanbytes(local_size)}). الحد الأقصى 2GB.")
 
         await status_msg.edit_text(f"🚀 تم التنزيل بنجاح ({humanbytes(local_size)})!\nجاري الرفع إلى تليجرام...")
         start_time = time.time()
@@ -378,33 +372,25 @@ async def handle_links(client, message: Message):
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
-# 🔄 معالجة خيارات Google Drive بالزرار
-@bot.on_callback_query(filters.regex(r'^gdrive_'))
+@bot.on_callback_query(filters.regex(r'^gdrive_process$'))
 async def gdrive_callback(client, callback: CallbackQuery):
     chat_id = callback.message.chat.id
-    action = callback.data
     url = pending_urls.get(chat_id)
 
     if not url:
         await callback.answer("❌ تعذر العثور على الرابط، الرجاء إعادة إرساله.", show_alert=True)
         return
 
-    status_msg = await callback.message.edit_text("⏳ جاري بدء معالجة الرابط عبر Google Drive...")
+    status_msg = await callback.message.edit_text("⏳ جاري تنزيل الملف من Google Drive إلى السيرفر...")
     file_path = None
     loop = asyncio.get_event_loop()
 
     try:
-        if action == "gdrive_download_first":
-            await status_msg.edit_text("📥 جاري تنزيل الملف من Google Drive إلى السيرفر أولاً...")
-            file_path = os.path.join(DOWNLOAD_DIR, f"gdrive_{int(time.time())}.bin")
-            gdown.download(url, file_path, quiet=False)
-        else:
-            await status_msg.edit_text("⚡ جاري جلب الملف مباشرة تحضيراً لرفعه لـ Fileditch...")
-            file_path = os.path.join(DOWNLOAD_DIR, f"gdrive_direct_{int(time.time())}.bin")
-            gdown.download(url, file_path, quiet=False)
+        output_path = os.path.join(DOWNLOAD_DIR, f"gdrive_{int(time.time())}.bin")
+        file_path = await loop.run_in_executor(None, lambda: gdown.download(url, output_path, quiet=True, fuzzy=True))
 
-        if not os.path.exists(file_path):
-            raise Exception("فشل تنزيل الملف من Google Drive.")
+        if not file_path or not os.path.exists(file_path):
+            raise Exception("فشل تنزيل الملف من Google Drive. التأكد من صلاحيات المشاركة (أي شخص لديه الرابط).")
 
         fileditch_url = await upload_to_fileditch_with_progress(file_path, status_msg, loop)
         file_name = os.path.basename(file_path)
@@ -425,7 +411,6 @@ async def gdrive_callback(client, callback: CallbackQuery):
             os.remove(file_path)
         pending_urls.pop(chat_id, None)
 
-# 📤 2. استقبال الملفات وتحويلها إلى Fileditch مع شريط النسبة اللحظي
 @bot.on_message((filters.document | filters.video | filters.audio) & filters.private)
 async def handle_files(client, message: Message):
     mode = user_modes.get(message.chat.id, "link_to_file")
