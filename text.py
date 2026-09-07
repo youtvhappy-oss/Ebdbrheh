@@ -2,7 +2,7 @@ import sys
 import subprocess
 import os
 
-# 1. 🧠 الشرط الذكي للتحقق من تثبيت المكتبات والمتصفح تلقائياً
+# 1. تثبيت المكتبات والاعتماديات تلقائياً
 def check_and_install_dependencies():
     required_packages = {
         "pyrogram": "pyrogram",
@@ -34,7 +34,6 @@ def check_and_install_dependencies():
         print("⚙️ جاري تثبيت حزمة aria2...")
         os.system("apt-get update -y && apt-get install -y aria2")
 
-    # تثبيت متصفح Firefox الخفيف (أخف من Chromium)
     firefox_cache = os.path.expanduser("~/.cache/ms-playwright")
     if not os.path.exists(firefox_cache) or not any("firefox" in f for f in os.listdir(firefox_cache) if os.path.isdir(os.path.join(firefox_cache, f))):
         print("🦊 جاري تثبيت متصفح Firefox الخفيف...")
@@ -57,6 +56,7 @@ import math
 import asyncio
 import nest_asyncio
 import requests
+import gdown
 from google.colab import userdata
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -77,7 +77,8 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 user_chat_id = None
 ping_task = None
 
-user_modes = {}  # {chat_id: "link_to_file" أو "file_to_link"}
+user_modes = {}       # {chat_id: "link_to_file" أو "file_to_link"}
+pending_urls = {}     # {chat_id: "url"} للتخزين المؤقت لروابط Drive
 
 bot = Client(
     f"bot_session_{int(time.time())}",
@@ -107,16 +108,65 @@ async def keep_alive_ping():
             except Exception as e:
                 print(f"⚠️ تعذر إرسال الإشارة: {e}")
 
-# 🚀 دالة الرفع إلى Fileditch
-def upload_to_fileditch(file_path):
+# قارئ ملفات مخصص لمتابعة نسبة الرفع
+class ProgressFileReader:
+    def __init__(self, filename, callback):
+        self.file = open(filename, 'rb')
+        self.total_size = os.path.getsize(filename)
+        self.uploaded = 0
+        self.callback = callback
+
+    def read(self, size=-1):
+        chunk = self.file.read(size)
+        if chunk:
+            self.uploaded += len(chunk)
+            self.callback(self.uploaded, self.total_size)
+        return chunk
+
+    def close(self):
+        self.file.close()
+
+# 🚀 دالة الرفع إلى Fileditch مع إظهار النسبة المئوية والتقدم
+async def upload_to_fileditch_with_progress(file_path, status_msg, loop):
     url = "https://new.fileditch.com/upload.php"
-    with open(file_path, "rb") as f:
-        files = {"file": f}
-        response = requests.post(url, files=files).json()
-        if response.get("success"):
-            return response.get("url")
-        else:
-            raise Exception(response.get("error", "فشل الرفع إلى Fileditch."))
+    start_time = time.time()
+    last_update = [0]
+
+    def on_upload_progress(current, total):
+        now = time.time()
+        if now - last_update[0] >= 3 or current == total:
+            last_update[0] = now
+            percentage = (current / total * 100) if total > 0 else 0
+            speed = current / (now - start_time) if (now - start_time) > 0 else 1
+            eta = round((total - current) / speed) if speed > 0 else 0
+
+            filled = int(10 * current // total)
+            bar = '█' * filled + '░' * (10 - filled)
+
+            text = (
+                f"⬆️ **جاري الرفع إلى Fileditch...**\n\n"
+                f"[{bar}] {percentage:.1f}%\n"
+                f"🚀 **السرعة:** {humanbytes(speed)}/s\n"
+                f"📦 **المرفوع:** {humanbytes(current)} / {humanbytes(total)}\n"
+                f"⏱️ **المتبقي:** {eta}s"
+            )
+            asyncio.run_coroutine_threadsafe(status_msg.edit_text(text), loop)
+
+    def _sync_upload():
+        reader = ProgressFileReader(file_path, on_upload_progress)
+        try:
+            files = {"file": (os.path.basename(file_path), reader)}
+            response = requests.post(url, files=files).json()
+            return response
+        finally:
+            reader.close()
+
+    response = await loop.run_in_executor(None, _sync_upload)
+    
+    if response.get("success"):
+        return response.get("url")
+    else:
+        raise Exception(response.get("error", "فشل الرفع إلى Fileditch."))
 
 # 🌐 معالج GoFile باستخدام Firefox الخفيف
 async def download_from_gofile(url):
@@ -127,7 +177,6 @@ async def download_from_gofile(url):
         await page.goto(url, wait_until="domcontentloaded")
         await page.wait_for_timeout(5000)
         
-        # البحث عن زر التحميل
         download_button = page.locator("a.filesContentTableActionsDownload, button:has-text('Download')").first
         async with page.expect_download(timeout=120000) as download_info:
             await download_button.click()
@@ -147,7 +196,6 @@ async def download_from_workupload(url):
         await page.goto(url, wait_until="domcontentloaded")
         await page.wait_for_timeout(5000)
         
-        # البحث عن زر التحميل
         download_button = page.locator("a.btn-download, a:has-text('Download')").first
         async with page.expect_download(timeout=120000) as download_info:
             await download_button.click()
@@ -158,7 +206,50 @@ async def download_from_workupload(url):
         await browser.close()
         return file_path
 
-# 🔘 لوحة التحكم بالأزرار
+# 📥 دالة التحميل المباشر مع النسبة المئوية
+async def download_direct(url, status_msg):
+    file_name = os.path.join(DOWNLOAD_DIR, url.split("/")[-1].split("?")[0] or "downloaded_file.bin")
+    session = requests.Session()
+    session.headers = {"User-Agent": "Mozilla/5.0"}
+    
+    response = session.get(url, stream=True)
+    total_size = int(response.headers.get('content-length', 0))
+    
+    downloaded = 0
+    start_time = time.time()
+    last_update = 0
+
+    with open(file_name, 'wb') as f:
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                f.write(chunk)
+                downloaded += len(chunk)
+                now = time.time()
+                
+                if now - last_update >= 3 or (total_size > 0 and downloaded == total_size):
+                    last_update = now
+                    percentage = (downloaded / total_size * 100) if total_size > 0 else 0
+                    speed = downloaded / (now - start_time) if (now - start_time) > 0 else 1
+                    eta = round((total_size - downloaded) / speed) if speed > 0 and total_size > 0 else 0
+                    
+                    filled = int(10 * downloaded // total_size) if total_size > 0 else 0
+                    bar = '█' * filled + '░' * (10 - filled)
+
+                    text = (
+                        f"⬇️ **جاري التنزيل المباشر إلى السيرفر...**\n\n"
+                        f"[{bar}] {percentage:.1f}%\n"
+                        f"🚀 **السرعة:** {humanbytes(speed)}/s\n"
+                        f"📦 **المُحمل:** {humanbytes(downloaded)} / {humanbytes(total_size if total_size > 0 else downloaded)}\n"
+                        f"⏱️ **المتبقي:** {eta}s"
+                    )
+                    try:
+                        await status_msg.edit_text(text)
+                    except Exception:
+                        pass
+                        
+    return file_name
+
+# 🔘 لوحات التحكم بالزرار
 def get_main_keyboard(current_mode):
     btn1_text = "✅ رابط ⬅️ ملف (تليجرام)" if current_mode == "link_to_file" else "رابط ⬅️ ملف (تليجرام)"
     btn2_text = "✅ ملف ⬅️ رابط (Fileditch)" if current_mode == "file_to_link" else "ملف ⬅️ رابط (Fileditch)"
@@ -166,6 +257,13 @@ def get_main_keyboard(current_mode):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(btn1_text, callback_data="mode_link_to_file")],
         [InlineKeyboardButton(btn2_text, callback_data="mode_file_to_link")]
+    ])
+    return keyboard
+
+def get_gdrive_options_keyboard():
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 تنزيل إلى Drive ثم التحويل لـ Fileditch", callback_data="gdrive_download_first")],
+        [InlineKeyboardButton("⚡ النقل المباشر من Google Drive إلى Fileditch", callback_data="gdrive_direct_fileditch")]
     ])
     return keyboard
 
@@ -198,18 +296,26 @@ async def mode_callback(client, callback: CallbackQuery):
     )
     await callback.answer("تم حفظ الاختيار")
 
-# 📥 1. استقبال الروابط (عند اختيار وضع: رابط ⬅️ ملف)
+# 📥 1. استقبال الروابط ومعالجتها
 @bot.on_message(filters.regex(r'https?://[^\s]+') & filters.private)
 async def handle_links(client, message: Message):
     mode = user_modes.get(message.chat.id, "link_to_file")
-    
-    if mode != "link_to_file":
-        await message.reply_text("⚠️ أنت في وضع **(ملف ⬅️ رابط)**. يرجى إرسال ملف أو التبديل إلى وضع **(رابط ⬅️ ملف)** من الأزرار بالأعلى.")
+    url = message.text.strip()
+
+    # إذا كان في وضع "ملف ⬅️ رابط" وتم إرسال رابط Google Drive
+    if mode == "file_to_link" and ("drive.google.com" in url or "docs.google.com" in url):
+        pending_urls[message.chat.id] = url
+        await message.reply_text(
+            "⚙️ **تم اكتشاف رابط Google Drive!**\nكيف ترغب في معالجة الملف للرفع إلى Fileditch؟",
+            reply_markup=get_gdrive_options_keyboard()
+        )
         return
 
-    url = message.text.strip()
-    status_msg = await message.reply_text("⚡ جاري تحليل الرابط واختيار المحرك...")
+    if mode != "link_to_file":
+        await message.reply_text("⚠️ أنت في وضع **(ملف ⬅️ رابط)**. يرجى إرسال ملف أو رابط Google Drive المخصص لـ Fileditch.")
+        return
 
+    status_msg = await message.reply_text("⚡ جاري تحليل الرابط واختيار المحرك...")
     file_path = None
     last_update = [0]
 
@@ -223,11 +329,10 @@ async def handle_links(client, message: Message):
             file_path = await download_from_workupload(url)
 
         else:
-            await status_msg.edit_text("⏳ جاري التنزيل المباشر...")
             file_path = await download_direct(url, status_msg)
 
         if not file_path or not os.path.exists(file_path):
-            raise Exception("تعذر تنزيل الملف، يرجى التأكد من الرابط.")
+            raise Exception("تعذر تنزيل الملف، يرجى التأكد من صحة الرابط.")
 
         local_size = os.path.getsize(file_path)
         if local_size > MAX_FILE_SIZE:
@@ -273,13 +378,60 @@ async def handle_links(client, message: Message):
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
-# 📤 2. استقبال الملفات (تحميل من تليجرام مع نسبة مئوية 🔥 ثم رفع إلى Fileditch)
+# 🔄 معالجة خيارات Google Drive بالزرار
+@bot.on_callback_query(filters.regex(r'^gdrive_'))
+async def gdrive_callback(client, callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    action = callback.data
+    url = pending_urls.get(chat_id)
+
+    if not url:
+        await callback.answer("❌ تعذر العثور على الرابط، الرجاء إعادة إرساله.", show_alert=True)
+        return
+
+    status_msg = await callback.message.edit_text("⏳ جاري بدء معالجة الرابط عبر Google Drive...")
+    file_path = None
+    loop = asyncio.get_event_loop()
+
+    try:
+        if action == "gdrive_download_first":
+            await status_msg.edit_text("📥 جاري تنزيل الملف من Google Drive إلى السيرفر أولاً...")
+            file_path = os.path.join(DOWNLOAD_DIR, f"gdrive_{int(time.time())}.bin")
+            gdown.download(url, file_path, quiet=False)
+        else:
+            await status_msg.edit_text("⚡ جاري جلب الملف مباشرة تحضيراً لرفعه لـ Fileditch...")
+            file_path = os.path.join(DOWNLOAD_DIR, f"gdrive_direct_{int(time.time())}.bin")
+            gdown.download(url, file_path, quiet=False)
+
+        if not os.path.exists(file_path):
+            raise Exception("فشل تنزيل الملف من Google Drive.")
+
+        fileditch_url = await upload_to_fileditch_with_progress(file_path, status_msg, loop)
+        file_name = os.path.basename(file_path)
+        file_size = humanbytes(os.path.getsize(file_path))
+
+        await status_msg.edit_text(
+            f"✅ **تم تحويل الملف من Google Drive إلى Fileditch بنجاح!**\n\n"
+            f"📁 **اسم الملف:** `{file_name}`\n"
+            f"📦 **الحجم:** `{file_size}`\n\n"
+            f"🔗 **رابط التحميل المباشر:**\n{fileditch_url}"
+        )
+
+    except Exception as e:
+        await status_msg.edit_text(f"❌ حدث خطأ أثناء المعالجة:\n`{str(e)}`")
+
+    finally:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+        pending_urls.pop(chat_id, None)
+
+# 📤 2. استقبال الملفات وتحويلها إلى Fileditch مع شريط النسبة اللحظي
 @bot.on_message((filters.document | filters.video | filters.audio) & filters.private)
 async def handle_files(client, message: Message):
     mode = user_modes.get(message.chat.id, "link_to_file")
     
     if mode != "file_to_link":
-        await message.reply_text("⚠️ أنت في وضع **(رابط ⬅️ ملف)**. يرجى التبديل إلى وضع **(ملف ⬅️ رابط)** أولاً من قائمة الأزرار.")
+        await message.reply_text("⚠️ أنت في وضع **(رابط ⬅️ ملف)**. يرجى التبديل إلى وضع **(ملف ⬅️ رابط)** من القائمة أولاً.")
         return
 
     status_msg = await message.reply_text("⬇️ جاري بدء تحميل الملف من تليجرام...")
@@ -287,7 +439,6 @@ async def handle_files(client, message: Message):
     last_update = [0]
     start_time = time.time()
 
-    # 📊 دالة حساب النسبة والسرعة أثناء التحميل من تليجرام
     async def download_progress(current, total):
         now = time.time()
         if now - last_update[0] >= 3:
@@ -312,13 +463,10 @@ async def handle_files(client, message: Message):
                 pass
 
     try:
-        # تحميل الملف من تليجرام مع تفعيل دالة النسبة المئوية
         file_path = await message.download(progress=download_progress)
-        
-        await status_msg.edit_text("🚀 اكتمل التحميل من تليجرام! جاري الرفع إلى خادم **Fileditch**...")
-        
         loop = asyncio.get_event_loop()
-        fileditch_url = await loop.run_in_executor(None, upload_to_fileditch, file_path)
+        
+        fileditch_url = await upload_to_fileditch_with_progress(file_path, status_msg, loop)
 
         file_name = os.path.basename(file_path)
         file_size = humanbytes(os.path.getsize(file_path))
@@ -337,22 +485,10 @@ async def handle_files(client, message: Message):
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
-async def download_direct(url, status_msg):
-    file_name = os.path.join(DOWNLOAD_DIR, url.split("/")[-1].split("?")[0] or "downloaded_file.bin")
-    session = requests.Session()
-    session.headers = {"User-Agent": "Mozilla/5.0"}
-    response = session.get(url, stream=True)
-    
-    with open(file_name, 'wb') as f:
-        for chunk in response.iter_content(chunk_size=1024*1024):
-            if chunk:
-                f.write(chunk)
-    return file_name
-
 async def start_bot():
     try:
         await bot.start()
-        print("🟢 تم تشغيل البوت بنجاح مع متصفح Firefox الخفيف!")
+        print("🟢 تم تشغيل البوت بنجاح ومزود بنسب التقدم اللحظية!")
         await idle()
     except Exception as e:
         print(f"⚠️ تنبيه أثناء التشغيل: {e}")
