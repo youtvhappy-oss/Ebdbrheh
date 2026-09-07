@@ -63,6 +63,7 @@ import gdown
 from google.colab import userdata
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.errors import MessageNotModified
 from playwright.async_api import async_playwright
 
 nest_asyncio.apply()
@@ -83,7 +84,7 @@ user_chat_id = None
 ping_task = None
 
 user_modes = {}       # {chat_id: "link_to_file" أو "file_to_link"}
-pending_urls = {}     # {chat_id: "url"} للتخزين المؤقت لروابط Drive
+pending_urls = {}     # {chat_id: "url"}
 
 bot = Client(
     f"bot_session_{int(time.time())}",
@@ -113,7 +114,6 @@ async def keep_alive_ping():
             except Exception as e:
                 print(f"⚠️ تعذر إرسال الإشارة: {e}")
 
-# قارئ مخصص للرفع اللحظي عبر aiohttp لعدم التعارض مع أسنك تليجرام
 class AsyncProgressFileReader:
     def __init__(self, filename, callback):
         self.filename = filename
@@ -135,11 +135,15 @@ class AsyncProgressFileReader:
     def close(self):
         self.file.close()
 
-# 🚀 دالة الرفع إلى Fileditch بنسبة مئوية وبدون خطأ coroutine
+# 🚀 دالة الرفع إلى Fileditch مع تجاوز حظر 403 Forbidden
 async def upload_to_fileditch_with_progress(file_path, status_msg):
     url = "https://new.fileditch.com/upload.php"
     start_time = time.time()
     last_update = [0]
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
 
     async def on_upload_progress(current, total):
         now = time.time()
@@ -161,21 +165,28 @@ async def upload_to_fileditch_with_progress(file_path, status_msg):
             )
             try:
                 await status_msg.edit_text(text)
+            except MessageNotModified:
+                pass
             except Exception:
                 pass
 
     reader = AsyncProgressFileReader(file_path, on_upload_progress)
     try:
         data = aiohttp.FormData()
-        data.add_field('file', reader, filename=os.path.basename(file_path))
+        data.add_field('files[]', reader, filename=os.path.basename(file_path))
         
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(headers=headers) as session:
             async with session.post(url, data=data) as resp:
+                if resp.status != 200:
+                    raise Exception(f"خطأ من السيرفر ({resp.status}): {await resp.text()}")
                 response = await resp.json()
     finally:
         reader.close()
 
     if response.get("success"):
+        files = response.get("files", [])
+        if files:
+            return files[0].get("url")
         return response.get("url")
     else:
         raise Exception(response.get("error", "فشل الرفع إلى Fileditch."))
@@ -254,6 +265,8 @@ async def download_direct(url, status_msg):
                             )
                             try:
                                 await status_msg.edit_text(text)
+                            except MessageNotModified:
+                                pass
                             except Exception:
                                 pass
                         
@@ -300,10 +313,14 @@ async def mode_callback(client, callback: CallbackQuery):
     
     mode_msg = "الوضع الحالي: **تحويل الرابط إلى ملف وإرساله إليك** 📥" if mode == "link_to_file" else "الوضع الحالي: **تحويل الملف المرفوع إلى رابط Fileditch والحفظ في Drive** 🔗"
     
-    await callback.message.edit_text(
-        f"تم تغيير الوضع بنجاح! ✅\n\n{mode_msg}\n\nاختر العملية التي تريدها دائماً عبر الأزرار:",
-        reply_markup=get_main_keyboard(mode)
-    )
+    try:
+        await callback.message.edit_text(
+            f"تم تغيير الوضع بنجاح! ✅\n\n{mode_msg}\n\nاختر العملية التي تريدها دائماً عبر الأزرار:",
+            reply_markup=get_main_keyboard(mode)
+        )
+    except MessageNotModified:
+        pass
+        
     await callback.answer("تم حفظ الاختيار")
 
 # 📥 1. استقبال الروابط ومعالجتها
@@ -370,6 +387,8 @@ async def handle_links(client, message: Message):
                 )
                 try:
                     await status_msg.edit_text(text)
+                except MessageNotModified:
+                    pass
                 except Exception:
                     pass
 
@@ -410,7 +429,6 @@ async def gdrive_callback(client, callback: CallbackQuery):
         if not os.path.exists(file_path):
             raise Exception("فشل تنزيل الملف من Google Drive.")
 
-        # حفظ نسخة في Google Drive Colab المربوط
         file_name = os.path.basename(file_path)
         drive_path = os.path.join(DRIVE_DIR, file_name)
         shutil.copy(file_path, drive_path)
@@ -468,6 +486,8 @@ async def handle_files(client, message: Message):
             )
             try:
                 await status_msg.edit_text(text)
+            except MessageNotModified:
+                pass
             except Exception:
                 pass
 
