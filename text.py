@@ -2,7 +2,7 @@ import sys
 import subprocess
 import os
 
-# 1. تثبيت المكتبات والاعتماديات تلقائياً
+# 1. تثبيت التبعيات والمكتبات تلقائياً
 def check_and_install_dependencies():
     required_packages = {
         "pyrogram": "pyrogram",
@@ -13,7 +13,8 @@ def check_and_install_dependencies():
         "yt_dlp": "yt-dlp",
         "gdown": "gdown",
         "bs4": "bs4",
-        "playwright": "playwright"
+        "playwright": "playwright",
+        "curl_cffi": "curl_cffi"
     }
     
     missing_packages = []
@@ -56,10 +57,9 @@ import time
 import math
 import asyncio
 import nest_asyncio
-import requests
-import aiohttp
 import shutil
 import gdown
+from curl_cffi import requests as curl_requests
 from google.colab import userdata
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -114,82 +114,50 @@ async def keep_alive_ping():
             except Exception as e:
                 print(f"⚠️ تعذر إرسال الإشارة: {e}")
 
-class AsyncProgressFileReader:
-    def __init__(self, filename, callback):
-        self.filename = filename
-        self.file = open(filename, 'rb')
-        self.total_size = os.path.getsize(filename)
-        self.uploaded = 0
-        self.callback = callback
-
-    async def __aiter__(self):
-        chunk_size = 64 * 1024
-        while True:
-            chunk = self.file.read(chunk_size)
-            if not chunk:
-                break
-            self.uploaded += len(chunk)
-            await self.callback(self.uploaded, self.total_size)
-            yield chunk
-
-    def close(self):
-        self.file.close()
-
-# 🚀 دالة الرفع إلى Fileditch مع تجاوز حظر 403 Forbidden
+# 🚀 دالة الرفع إلى Fileditch مع محاكاة متصفح Chrome حقيقي
 async def upload_to_fileditch_with_progress(file_path, status_msg):
     url = "https://new.fileditch.com/upload.php"
-    start_time = time.time()
-    last_update = [0]
-
+    
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Origin": "https://fileditch.com",
+        "Referer": "https://fileditch.com/"
     }
 
-    async def on_upload_progress(current, total):
-        now = time.time()
-        if now - last_update[0] >= 3 or current == total:
-            last_update[0] = now
-            percentage = (current / total * 100) if total > 0 else 0
-            speed = current / (now - start_time) if (now - start_time) > 0 else 1
-            eta = round((total - current) / speed) if speed > 0 else 0
-
-            filled = int(10 * current // total)
-            bar = '█' * filled + '░' * (10 - filled)
-
-            text = (
-                f"⬆️ **جاري الرفع إلى Fileditch...**\n\n"
-                f"[{bar}] {percentage:.1f}%\n"
-                f"🚀 **السرعة:** {humanbytes(speed)}/s\n"
-                f"📦 **المرفوع:** {humanbytes(current)} / {humanbytes(total)}\n"
-                f"⏱️ **المتبقي:** {eta}s"
-            )
-            try:
-                await status_msg.edit_text(text)
-            except MessageNotModified:
-                pass
-            except Exception:
-                pass
-
-    reader = AsyncProgressFileReader(file_path, on_upload_progress)
     try:
-        data = aiohttp.FormData()
-        data.add_field('files[]', reader, filename=os.path.basename(file_path))
-        
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.post(url, data=data) as resp:
-                if resp.status != 200:
-                    raise Exception(f"خطأ من السيرفر ({resp.status}): {await resp.text()}")
-                response = await resp.json()
-    finally:
-        reader.close()
+        await status_msg.edit_text("⬆️ **جاري الرفع إلى Fileditch...**")
+    except Exception:
+        pass
 
-    if response.get("success"):
-        files = response.get("files", [])
+    loop = asyncio.get_event_loop()
+
+    def perform_upload():
+        with open(file_path, 'rb') as f:
+            files = {'files[]': (os.path.basename(file_path), f)}
+            response = curl_requests.post(
+                url, 
+                files=files, 
+                headers=headers, 
+                impersonate="chrome110",
+                timeout=600
+            )
+            return response
+
+    response = await loop.run_in_executor(None, perform_upload)
+
+    if response.status_code != 200:
+        raise Exception(f"خطأ من السيرفر ({response.status_code}): {response.text}")
+
+    res_json = response.json()
+
+    if res_json.get("success"):
+        files = res_json.get("files", [])
         if files:
             return files[0].get("url")
-        return response.get("url")
+        return res_json.get("url")
     else:
-        raise Exception(response.get("error", "فشل الرفع إلى Fileditch."))
+        raise Exception(res_json.get("error", "فشل الرفع إلى Fileditch."))
 
 # 🌐 معالج GoFile
 async def download_from_gofile(url):
@@ -231,6 +199,7 @@ async def download_from_workupload(url):
 
 # 📥 دالة التحميل المباشر
 async def download_direct(url, status_msg):
+    import aiohttp
     file_name = os.path.join(DOWNLOAD_DIR, url.split("/")[-1].split("?")[0] or "downloaded_file.bin")
     
     async with aiohttp.ClientSession() as session:
