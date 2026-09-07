@@ -58,6 +58,7 @@ import asyncio
 import nest_asyncio
 import requests
 import aiohttp
+import shutil
 import gdown
 from google.colab import userdata
 from pyrogram import Client, filters, idle
@@ -74,7 +75,9 @@ BOT_TOKEN = userdata.get('BOT_TOKEN').strip()
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024 
 
 DOWNLOAD_DIR = os.path.abspath("./downloads")
+DRIVE_DIR = "/content/drive/MyDrive/TelegramBot"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+os.makedirs(DRIVE_DIR, exist_ok=True)
 
 user_chat_id = None
 ping_task = None
@@ -110,7 +113,7 @@ async def keep_alive_ping():
             except Exception as e:
                 print(f"⚠️ تعذر إرسال الإشارة: {e}")
 
-# قارئ مخصص للرفع اللحظي عبر aiohttp لتجنب مشاكل الخيوط والتكرار
+# قارئ مخصص للرفع اللحظي عبر aiohttp لعدم التعارض مع أسنك تليجرام
 class AsyncProgressFileReader:
     def __init__(self, filename, callback):
         self.filename = filename
@@ -132,7 +135,7 @@ class AsyncProgressFileReader:
     def close(self):
         self.file.close()
 
-# 🚀 دالة الرفع إلى Fileditch مع إظهار النسبة المئوية والتقدم بشكل async كامل
+# 🚀 دالة الرفع إلى Fileditch بنسبة مئوية وبدون خطأ coroutine
 async def upload_to_fileditch_with_progress(file_path, status_msg):
     url = "https://new.fileditch.com/upload.php"
     start_time = time.time()
@@ -177,7 +180,7 @@ async def upload_to_fileditch_with_progress(file_path, status_msg):
     else:
         raise Exception(response.get("error", "فشل الرفع إلى Fileditch."))
 
-# 🌐 معالج GoFile باستخدام Firefox الخفيف
+# 🌐 معالج GoFile
 async def download_from_gofile(url):
     async with async_playwright() as p:
         browser = await p.firefox.launch(headless=True)
@@ -196,7 +199,7 @@ async def download_from_gofile(url):
         await browser.close()
         return file_path
 
-# 🌐 معالج WorkUpload باستخدام Firefox الخفيف
+# 🌐 معالج WorkUpload
 async def download_from_workupload(url):
     async with async_playwright() as p:
         browser = await p.firefox.launch(headless=True)
@@ -215,7 +218,7 @@ async def download_from_workupload(url):
         await browser.close()
         return file_path
 
-# 📥 دالة التحميل المباشر مع النسبة المئوية
+# 📥 دالة التحميل المباشر
 async def download_direct(url, status_msg):
     file_name = os.path.join(DOWNLOAD_DIR, url.split("/")[-1].split("?")[0] or "downloaded_file.bin")
     
@@ -259,7 +262,7 @@ async def download_direct(url, status_msg):
 # 🔘 لوحات التحكم بالزرار
 def get_main_keyboard(current_mode):
     btn1_text = "✅ رابط ⬅️ ملف (تليجرام)" if current_mode == "link_to_file" else "رابط ⬅️ ملف (تليجرام)"
-    btn2_text = "✅ ملف ⬅️ رابط (Fileditch)" if current_mode == "file_to_link" else "ملف ⬅️ رابط (Fileditch)"
+    btn2_text = "✅ ملف ⬅️ رابط (Fileditch + Drive)" if current_mode == "file_to_link" else "ملف ⬅️ رابط (Fileditch + Drive)"
     
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(btn1_text, callback_data="mode_link_to_file")],
@@ -295,7 +298,7 @@ async def mode_callback(client, callback: CallbackQuery):
     mode = callback.data.replace("mode_", "")
     user_modes[callback.message.chat.id] = mode
     
-    mode_msg = "الوضع الحالي: **تحويل الرابط إلى ملف وإرساله إليك** 📥" if mode == "link_to_file" else "الوضع الحالي: **تحويل الملف المرفوع إلى رابط Fileditch** 🔗"
+    mode_msg = "الوضع الحالي: **تحويل الرابط إلى ملف وإرساله إليك** 📥" if mode == "link_to_file" else "الوضع الحالي: **تحويل الملف المرفوع إلى رابط Fileditch والحفظ في Drive** 🔗"
     
     await callback.message.edit_text(
         f"تم تغيير الوضع بنجاح! ✅\n\n{mode_msg}\n\nاختر العملية التي تريدها دائماً عبر الأزرار:",
@@ -388,7 +391,6 @@ async def handle_links(client, message: Message):
 @bot.on_callback_query(filters.regex(r'^gdrive_'))
 async def gdrive_callback(client, callback: CallbackQuery):
     chat_id = callback.message.chat.id
-    action = callback.data
     url = pending_urls.get(chat_id)
 
     if not url:
@@ -408,14 +410,19 @@ async def gdrive_callback(client, callback: CallbackQuery):
         if not os.path.exists(file_path):
             raise Exception("فشل تنزيل الملف من Google Drive.")
 
-        fileditch_url = await upload_to_fileditch_with_progress(file_path, status_msg)
+        # حفظ نسخة في Google Drive Colab المربوط
         file_name = os.path.basename(file_path)
+        drive_path = os.path.join(DRIVE_DIR, file_name)
+        shutil.copy(file_path, drive_path)
+
+        fileditch_url = await upload_to_fileditch_with_progress(file_path, status_msg)
         file_size = humanbytes(os.path.getsize(file_path))
 
         await status_msg.edit_text(
-            f"✅ **تم تحويل الملف من Google Drive إلى Fileditch بنجاح!**\n\n"
+            f"✅ **تمت العملية بنجاح!**\n\n"
             f"📁 **اسم الملف:** `{file_name}`\n"
-            f"📦 **الحجم:** `{file_size}`\n\n"
+            f"📦 **الحجم:** `{file_size}`\n"
+            f"💾 **المسار في Drive:** `MyDrive/TelegramBot/{file_name}`\n\n"
             f"🔗 **رابط التحميل المباشر:**\n{fileditch_url}"
         )
 
@@ -427,7 +434,7 @@ async def gdrive_callback(client, callback: CallbackQuery):
             os.remove(file_path)
         pending_urls.pop(chat_id, None)
 
-# 📤 2. استقبال الملفات وتحويلها إلى Fileditch مع شريط النسبة اللحظي
+# 📤 2. استقبال الملفات المرفوعة وحفظها في Google Drive ثم تحويلها لـ Fileditch
 @bot.on_message((filters.document | filters.video | filters.audio) & filters.private)
 async def handle_files(client, message: Message):
     mode = user_modes.get(message.chat.id, "link_to_file")
@@ -465,16 +472,24 @@ async def handle_files(client, message: Message):
                 pass
 
     try:
+        # 1. التنزيل من تليجرام
         file_path = await message.download(progress=download_progress)
-        fileditch_url = await upload_to_fileditch_with_progress(file_path, status_msg)
-
         file_name = os.path.basename(file_path)
+
+        # 2. حفظ نسخة مباشرة داخل Google Drive المربوط
+        await status_msg.edit_text("📂 جاري حفظ نسخة من الملف داخل Google Drive...")
+        drive_path = os.path.join(DRIVE_DIR, file_name)
+        shutil.copy(file_path, drive_path)
+
+        # 3. الرفع إلى Fileditch
+        fileditch_url = await upload_to_fileditch_with_progress(file_path, status_msg)
         file_size = humanbytes(os.path.getsize(file_path))
 
         await status_msg.edit_text(
             f"✅ **تم تحويل الملف إلى رابط بنجاح!**\n\n"
             f"📁 **اسم الملف:** `{file_name}`\n"
-            f"📦 **الحجم:** `{file_size}`\n\n"
+            f"📦 **الحجم:** `{file_size}`\n"
+            f"💾 **حُفظ في Drive:** `MyDrive/TelegramBot/{file_name}`\n\n"
             f"🔗 **رابط التحميل المباشر:**\n{fileditch_url}"
         )
 
