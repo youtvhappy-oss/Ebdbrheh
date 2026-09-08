@@ -2,14 +2,14 @@ import sys
 import subprocess
 import os
 
-# 1. 🧠 الشرط الذكي للتحقق من تثبيت المكتبات والمتصفح تلقائياً
+# 1. 🧠 تثبيت المكتبات والمتصفح تلقائياً
 def check_and_install_dependencies():
     required_packages = {
         "pyrogram": "pyrogram",
         "tgcrypto": "tgcrypto",
         "nest_asyncio": "nest_asyncio",
         "requests": "requests",
-        "socks": "pysocks",          # ← لدعم WARP (احتياط في حال حجب IP كولاب)
+        "socks": "pysocks",
         "yt_dlp": "yt-dlp",
         "gdown": "gdown",
         "bs4": "bs4",
@@ -33,7 +33,6 @@ def check_and_install_dependencies():
         print("⚙️ جاري تثبيت حزمة aria2...")
         os.system("apt-get update -y && apt-get install -y aria2")
 
-    # تثبيت متصفح Firefox الخفيف (أخف من Chromium)
     firefox_cache = os.path.expanduser("~/.cache/ms-playwright")
     if not os.path.exists(firefox_cache) or not any(
             "firefox" in f for f in os.listdir(firefox_cache)
@@ -47,7 +46,7 @@ def check_and_install_dependencies():
 check_and_install_dependencies()
 
 # ==========================================
-# 2. استيراد المكتبات والتهيئات
+# 2. الاستيراد والتهيئات
 # ==========================================
 import warnings
 warnings.filterwarnings("ignore")
@@ -76,7 +75,7 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 user_chat_id = None
 ping_task = None
-user_modes = {}   # {chat_id: "link_to_file" أو "file_to_link"}
+user_modes = {}
 
 bot = Client(
     f"bot_session_{int(time.time())}",
@@ -107,10 +106,10 @@ async def keep_alive_ping():
                 print(f"⚠️ تعذر إرسال الإشارة: {e}")
 
 # ==========================================
-# 3. 🚀 الرفع إلى Buzzheavier — وفق التوثيق الرسمي حرفياً
-#    Method: PUT | Endpoint: https://w.buzzheavier.com/{name}
-#    الملف هو body الطلب مباشرة (مثل: curl -T "file.mp4" URL)
-#    الناتج: رابط بصيغة https://buzzheavier.com/xxxxxxxx
+# 3. 🚀 الرفع إلى Buzzheavier (الإصدار المُصحَّح)
+#    PUT https://w.buzzheavier.com/{name}
+#    الرد الرسمي: {"data": {"id": "xxxx"}}
+#    الرابط النهائي: https://buzzheavier.com/{id}  ← بدون f/ وبدون غيره
 # ==========================================
 
 BUZZ_UPLOAD_BASE = "https://w.buzzheavier.com"
@@ -118,13 +117,9 @@ BUZZ_LINK_BASE   = "https://buzzheavier.com"
 WARP_PROXIES     = {"http": "socks5h://127.0.0.1:40000", "https": "socks5h://127.0.0.1:40000"}
 _warp_ready      = [False]
 
-# مسارات صفحات الموقع (لا تُعد روابط ملفات)
-_BUZZ_PAGES = ("api", "pricing", "blog", "speed-test", "developers",
-               "privacy", "terms", "proxy", "contact", "help")
-
 
 class _ProgressReader:
-    """غلاف الملف: يرسل Content-Length تلقائياً (مثل curl -T) + تقارير تقدم مُهدّأة"""
+    """غلاف الملف: Content-Length تلقائي (مثل curl -T) + تقارير تقدم"""
     def __init__(self, path, callback=None, report_every=2):
         self._f = open(path, "rb")
         self.size = os.path.getsize(path)
@@ -155,53 +150,40 @@ class _ProgressReader:
             pass
 
 
-def _normalize_buzz_link(link):
-    """توحيد الرابط ليصبح بصيغة: https://buzzheavier.com/xxx"""
-    if not link:
-        return None
-    link = str(link).strip()
-    link = link.replace("w.buzzheavier.com", "buzzheavier.com").replace("www.buzzheavier.com", "buzzheavier.com")
-    # استبعاد روابط الصفحات الثابتة (api/privacy/...)
-    if "buzzheavier.com/" in link:
-        path = link.split("buzzheavier.com/", 1)[-1].split("?")[0].rstrip("/")
-        if path and "/" not in path and path.lower() not in _BUZZ_PAGES:
-            return f"{BUZZ_LINK_BASE}/{path}"
-    return None
-
-
-def _extract_buzz_link(response):
-    """استخراج رابط التحميل من رد السيرفر بأي صيغة (JSON / نص خام / هيدر Location)"""
-    # 1) مفاتيح JSON المعروفة
+def _get_buzz_link(response):
+    """
+    ⭐ الاستخراج الصحيح:
+    الرد الرسمي JSON:  {"data": {"id": "1mzlenars4aa"}, "code": 201, ...}
+    الرابط الصحيح:     https://buzzheavier.com/1mzlenars4aa
+    (لا نستخدم "code" أو أي رقم — فقط data.id)
+    """
     try:
         data = response.json()
-        if isinstance(data, dict):
-            for key in ("link", "url", "downloadUrl", "download_url",
-                        "shortLink", "short_url", "fileUrl", "file_url"):
-                v = data.get(key)
-                if v and str(v).startswith("http"):
-                    r = _normalize_buzz_link(v)
-                    if r:
-                        return r
-            for key in ("id", "fileId", "slug", "code", "shortId"):
-                v = data.get(key)
-                if v and isinstance(v, (str, int)):
-                    return f"{BUZZ_LINK_BASE}/{v}"
     except Exception:
-        pass
-    # 2) أي رابط buzzheavier داخل النص الخام (يشمل JSON المتداخل)
-    for m in re.finditer(r'https?://(?:w\.|www\.)?buzzheavier\.com/[A-Za-z0-9_-]+', response.text or ""):
-        r = _normalize_buzz_link(m.group(0))
-        if r:
-            return r
-    # 3) هيدر Location
-    loc = response.headers.get("Location", "")
-    if "buzzheavier.com" in loc:
-        return _normalize_buzz_link(loc)
+        data = None
+
+    if isinstance(data, dict):
+        d = data.get("data")
+        # ✅ المسار الرسمي: data.id
+        if isinstance(d, dict) and d.get("id"):
+            return f"{BUZZ_LINK_BASE}/{str(d['id']).strip()}"
+        if isinstance(d, str) and d.strip():
+            return f"{BUZZ_LINK_BASE}/{d.strip()}"
+        # احتياط: id نصي في المستوى الأول (نص فقط حتى لا نلتقط رقم الحالة 201)
+        fid = data.get("id")
+        if isinstance(fid, str) and len(fid.strip()) >= 6:
+            return f"{BUZZ_LINK_BASE}/{fid.strip()}"
+
+    # احتياط أخير: معرف داخل نص الرد (نتجاهل f/ وصفحات الموقع الثابتة)
+    for m in re.finditer(r'buzzheavier\.com/(?:f/)?([A-Za-z0-9_-]{8,})', response.text or ""):
+        cand = m.group(1)
+        if cand.lower() not in ("speed-test", "developers"):
+            return f"{BUZZ_LINK_BASE}/{cand}"
     return None
 
 
 def _start_warp():
-    """تشغيل WARP كبروكسي محلي — يُستخدم فقط إذا حُظر IP كولاب (403)"""
+    """تشغيل WARP كبروكسي — فقط إذا حُظر IP كولاب (403)"""
     if _warp_ready[0]:
         return True
     print("🛡️ شبكة كولاب محجوبة → تشغيل WARP VPN...")
@@ -234,12 +216,8 @@ def _start_warp():
 
 
 def upload_to_buzzheavier(file_path, progress_callback=None):
-    """
-    الرفع المجهول إلى Buzzheavier وفق التوثيق الرسمي:
-    PUT https://w.buzzheavier.com/{name} — والملف هو body الطلب.
-    يعيد الرابط النهائي بصيغة: https://buzzheavier.com/xxxxxxxx
-    """
-    name = os.path.basename(file_path)[:500]   # الحد الرسمي: 500 حرف
+    """PUT الرسمي — يعيد الرابط بصيغة: https://buzzheavier.com/{id}"""
+    name = os.path.basename(file_path)[:500]
     endpoint = f"{BUZZ_UPLOAD_BASE}/{urllib.parse.quote(name, safe='')}"
 
     session = requests.Session()
@@ -252,19 +230,19 @@ def upload_to_buzzheavier(file_path, progress_callback=None):
     use_proxy = False
     last_err = None
 
-    for attempt in range(1, 4):                # حتى 3 محاولات
+    for attempt in range(1, 4):
         body = None
         try:
             body = _ProgressReader(file_path, progress_callback)
             response = session.put(
                 endpoint,
-                data=body,                     # ← الملف هو الطلب نفسه (مثل curl -T)
+                data=body,
                 proxies=WARP_PROXIES if use_proxy else None,
                 timeout=(30, 900),
             )
 
             if response.status_code in (200, 201):
-                link = _extract_buzz_link(response)
+                link = _get_buzz_link(response)
                 if link:
                     return link
                 last_err = Exception(f"رد غير مفهوم من السيرفر: {str(response.text)[:200]}")
@@ -275,7 +253,7 @@ def upload_to_buzzheavier(file_path, progress_callback=None):
                     print(f"⛔ محاولة {attempt}: HTTP {response.status_code} → تشغيل WARP...")
                     if _start_warp():
                         use_proxy = True
-                        continue               # إعادة الرفع عبر IP الجديد
+                        continue
 
             else:
                 last_err = Exception(f"HTTP {response.status_code}: {str(response.text)[:200]}")
@@ -289,7 +267,7 @@ def upload_to_buzzheavier(file_path, progress_callback=None):
 
     raise Exception(f"فشل الرفع إلى Buzzheavier: {last_err}")
 
-# 🌐 معالج GoFile باستخدام Firefox الخفيف
+# 🌐 معالج GoFile
 async def download_from_gofile(url):
     async with async_playwright() as p:
         browser = await p.firefox.launch(headless=True)
@@ -306,7 +284,7 @@ async def download_from_gofile(url):
         await browser.close()
         return file_path
 
-# 🌐 معالج WorkUpload باستخدام Firefox الخفيف
+# 🌐 معالج WorkUpload
 async def download_from_workupload(url):
     async with async_playwright() as p:
         browser = await p.firefox.launch(headless=True)
@@ -323,7 +301,7 @@ async def download_from_workupload(url):
         await browser.close()
         return file_path
 
-# 🔘 لوحة التحكم بالأزرار
+# 🔘 لوحة التحكم
 def get_main_keyboard(current_mode):
     btn1_text = "✅ رابط ⬅️ ملف (تليجرام)" if current_mode == "link_to_file" else "رابط ⬅️ ملف (تليجرام)"
     btn2_text = "✅ ملف ⬅️ رابط (Buzzheavier)" if current_mode == "file_to_link" else "ملف ⬅️ رابط (Buzzheavier)"
@@ -362,7 +340,7 @@ async def mode_callback(client, callback: CallbackQuery):
     )
     await callback.answer("تم حفظ الاختيار")
 
-# 📥 1. استقبال الروابط (عند اختيار وضع: رابط ⬅️ ملف)
+# 📥 1. استقبال الروابط
 @bot.on_message(filters.regex(r'https?://[^\s]+') & filters.private)
 async def handle_links(client, message: Message):
     mode = user_modes.get(message.chat.id, "link_to_file")
@@ -441,7 +419,7 @@ async def handle_links(client, message: Message):
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
-# 📤 2. استقبال الملفات (تحميل من تليجرام ثم رفع إلى Buzzheavier 🔗)
+# 📤 2. استقبال الملفات → رفع إلى Buzzheavier
 @bot.on_message((filters.document | filters.video | filters.audio) & filters.private)
 async def handle_files(client, message: Message):
     mode = user_modes.get(message.chat.id, "link_to_file")
@@ -456,7 +434,6 @@ async def handle_files(client, message: Message):
     last_update = [0]
     start_time = time.time()
 
-    # 📊 النسبة والسرعة أثناء التحميل من تليجرام
     async def download_progress(current, total):
         now = time.time()
         if now - last_update[0] >= 3:
@@ -482,7 +459,6 @@ async def handle_files(client, message: Message):
         file_path = await message.download(progress=download_progress)
         await status_msg.edit_text("🚀 اكتمل التحميل من تليجرام! جاري الرفع إلى **Buzzheavier**...")
 
-        # ⬆️ شريط تقدم الرفع إلى Buzzheavier
         loop = asyncio.get_event_loop()
         up_last = [0.0]
         up_start = [time.time()]
@@ -549,7 +525,7 @@ async def download_direct(url, status_msg):
 async def start_bot():
     try:
         await bot.start()
-        print("🟢 تم تشغيل البوت بنجاح — الرفع الآن عبر Buzzheavier (PUT الرسمي)!")
+        print("🟢 البوت يعمل — الرفع عبر Buzzheavier (روابط بصيغة buzzheavier.com/{id})")
         await idle()
     except Exception as e:
         print(f"⚠️ تنبيه أثناء التشغيل: {e}")
