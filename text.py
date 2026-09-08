@@ -1,6 +1,7 @@
 import sys
 import subprocess
 import os
+import shutil
 
 # 1. 🧠 تثبيت المكتبات والمتصفح تلقائياً
 def check_and_install_dependencies():
@@ -106,10 +107,7 @@ async def keep_alive_ping():
                 print(f"⚠️ تعذر إرسال الإشارة: {e}")
 
 # ==========================================
-# 3. 🚀 الرفع إلى Buzzheavier (الإصدار المُصحَّح)
-#    PUT https://w.buzzheavier.com/{name}
-#    الرد الرسمي: {"data": {"id": "xxxx"}}
-#    الرابط النهائي: https://buzzheavier.com/{id}  ← بدون f/ وبدون غيره
+# 3. 🚀 الرفع إلى Buzzheavier (كما هو — يعمل)
 # ==========================================
 
 BUZZ_UPLOAD_BASE = "https://w.buzzheavier.com"
@@ -119,7 +117,6 @@ _warp_ready      = [False]
 
 
 class _ProgressReader:
-    """غلاف الملف: Content-Length تلقائي (مثل curl -T) + تقارير تقدم"""
     def __init__(self, path, callback=None, report_every=2):
         self._f = open(path, "rb")
         self.size = os.path.getsize(path)
@@ -151,12 +148,7 @@ class _ProgressReader:
 
 
 def _get_buzz_link(response):
-    """
-    ⭐ الاستخراج الصحيح:
-    الرد الرسمي JSON:  {"data": {"id": "1mzlenars4aa"}, "code": 201, ...}
-    الرابط الصحيح:     https://buzzheavier.com/1mzlenars4aa
-    (لا نستخدم "code" أو أي رقم — فقط data.id)
-    """
+    """الرد الرسمي: {"data": {"id": "xxxx"}} → https://buzzheavier.com/{id}"""
     try:
         data = response.json()
     except Exception:
@@ -164,17 +156,14 @@ def _get_buzz_link(response):
 
     if isinstance(data, dict):
         d = data.get("data")
-        # ✅ المسار الرسمي: data.id
         if isinstance(d, dict) and d.get("id"):
             return f"{BUZZ_LINK_BASE}/{str(d['id']).strip()}"
         if isinstance(d, str) and d.strip():
             return f"{BUZZ_LINK_BASE}/{d.strip()}"
-        # احتياط: id نصي في المستوى الأول (نص فقط حتى لا نلتقط رقم الحالة 201)
         fid = data.get("id")
         if isinstance(fid, str) and len(fid.strip()) >= 6:
             return f"{BUZZ_LINK_BASE}/{fid.strip()}"
 
-    # احتياط أخير: معرف داخل نص الرد (نتجاهل f/ وصفحات الموقع الثابتة)
     for m in re.finditer(r'buzzheavier\.com/(?:f/)?([A-Za-z0-9_-]{8,})', response.text or ""):
         cand = m.group(1)
         if cand.lower() not in ("speed-test", "developers"):
@@ -183,7 +172,6 @@ def _get_buzz_link(response):
 
 
 def _start_warp():
-    """تشغيل WARP كبروكسي — فقط إذا حُظر IP كولاب (403)"""
     if _warp_ready[0]:
         return True
     print("🛡️ شبكة كولاب محجوبة → تشغيل WARP VPN...")
@@ -216,7 +204,6 @@ def _start_warp():
 
 
 def upload_to_buzzheavier(file_path, progress_callback=None):
-    """PUT الرسمي — يعيد الرابط بصيغة: https://buzzheavier.com/{id}"""
     name = os.path.basename(file_path)[:500]
     endpoint = f"{BUZZ_UPLOAD_BASE}/{urllib.parse.quote(name, safe='')}"
 
@@ -267,7 +254,46 @@ def upload_to_buzzheavier(file_path, progress_callback=None):
 
     raise Exception(f"فشل الرفع إلى Buzzheavier: {last_err}")
 
-# 🌐 معالج GoFile
+# ==========================================
+# 3.5 ⬆️ رفع Buzzheavier مع شريط تقدم (مشترك بين الوضعين)
+# ==========================================
+async def upload_to_buzz_with_progress(file_path, status_msg):
+    loop = asyncio.get_event_loop()
+    up_last = [0.0]
+    up_start = [time.time()]
+
+    async def upload_progress(current, total):
+        now = time.time()
+        if now - up_last[0] >= 3 and total:
+            up_last[0] = now
+            percentage = current * 100 / total
+            speed = current / (now - up_start[0]) if (now - up_start[0]) > 0 else 1
+            eta = round((total - current) / speed) if speed > 0 else 0
+            filled = int(10 * current // total)
+            bar = '█' * filled + '░' * (10 - filled)
+            text = (
+                f"⬆️ **جاري الرفع إلى Buzzheavier...**\n\n"
+                f"[{bar}] {percentage:.1f}%\n"
+                f"🚀 **السرعة:** {humanbytes(speed)}/s\n"
+                f"📦 **المرفوع:** {humanbytes(current)} / {humanbytes(total)}\n"
+                f"⏱️ **المتبقي:** {eta}s"
+            )
+            try:
+                await status_msg.edit_text(text)
+            except Exception:
+                pass
+
+    def thread_progress(current, total):
+        asyncio.run_coroutine_threadsafe(upload_progress(current, total), loop)
+
+    return await loop.run_in_executor(
+        None, lambda: upload_to_buzzheavier(file_path, thread_progress)
+    )
+
+# ==========================================
+# 4. 🌐 محركات التحميل
+# ==========================================
+
 async def download_from_gofile(url):
     async with async_playwright() as p:
         browser = await p.firefox.launch(headless=True)
@@ -284,7 +310,6 @@ async def download_from_gofile(url):
         await browser.close()
         return file_path
 
-# 🌐 معالج WorkUpload
 async def download_from_workupload(url):
     async with async_playwright() as p:
         browser = await p.firefox.launch(headless=True)
@@ -301,16 +326,169 @@ async def download_from_workupload(url):
         await browser.close()
         return file_path
 
-# 🔘 لوحة التحكم
-def get_main_keyboard(current_mode):
-    btn1_text = "✅ رابط ⬅️ ملف (تليجرام)" if current_mode == "link_to_file" else "رابط ⬅️ ملف (تليجرام)"
-    btn2_text = "✅ ملف ⬅️ رابط (Buzzheavier)" if current_mode == "file_to_link" else "ملف ⬅️ رابط (Buzzheavier)"
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton(btn1_text, callback_data="mode_link_to_file")],
-            [InlineKeyboardButton(btn2_text, callback_data="mode_file_to_link")]
-        ]
+# ⭕ MEGA عبر المتصفح (جديد)
+async def download_from_mega(url):
+    async with async_playwright() as p:
+        browser = await p.firefox.launch(headless=True)
+        context = await browser.new_context(accept_downloads=True)
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=90000)
+            await page.wait_for_timeout(12000)
+
+            # روابط المجلدات → فتح أول ملف
+            if "/folder/" in url or "#F!" in url:
+                try:
+                    row = page.locator("tr[data-handle], .grid-scrolling-table-row, tbody tr").first
+                    if await row.count() > 0:
+                        await row.dblclick()
+                        await page.wait_for_timeout(6000)
+                except Exception:
+                    pass
+
+            # البحث عن زر التحميل (الأدق أولاً)
+            download = None
+            for sel in ["button.download-button",
+                        "a.download-button",
+                        "a[class*='download']",
+                        "button:has-text('Download')",
+                        "a:has-text('Download')"]:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.count() == 0 or not await btn.is_visible():
+                        continue
+                    async with page.expect_download(timeout=2700000) as dl_info:  # حتى 45 دقيقة
+                        await btn.click()
+                    download = await dl_info.value
+                    break
+                except Exception:
+                    continue
+
+            if download is None:
+                raise Exception("لم يتم العثور على زر التحميل في صفحة MEGA")
+
+            fname = download.suggested_filename or "mega_file.bin"
+            file_path = os.path.join(DOWNLOAD_DIR, fname)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            await download.save_as(file_path)
+            return file_path
+        finally:
+            await browser.close()
+
+# ⭕ MEGA: المتصفح أولاً — وإن فشل → megatools تلقائياً
+async def download_mega_smart(url):
+    try:
+        return await download_from_mega(url)
+    except Exception as e:
+        print(f"⚠️ متصفح MEGA فشل: {e} → تجربة megatools...")
+    if shutil.which("megadl") is None:
+        os.system("apt-get update -qq && apt-get install -y -qq megatools")
+    before = set(os.listdir(DOWNLOAD_DIR))
+    proc = await asyncio.create_subprocess_exec(
+        "megadl", "--path", DOWNLOAD_DIR + os.sep, url,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    await proc.wait()
+    new_files = [f for f in os.listdir(DOWNLOAD_DIR) if f not in before]
+    if new_files:
+        return os.path.join(DOWNLOAD_DIR, sorted(new_files)[0])
+    raise Exception("فشل تحميل رابط MEGA (المتصفح و megatools كلاهما)")
+
+# ⬇️ تنزيل مباشر مع شريط تقدم (محسّن)
+def _download_direct_sync(url, progress_callback=None):
+    file_name = os.path.join(
+        DOWNLOAD_DIR,
+        url.split("/")[-1].split("?")[0] or "downloaded_file.bin"
     )
+    session = requests.Session()
+    session.headers = {"User-Agent": "Mozilla/5.0"}
+    response = session.get(url, stream=True, timeout=(30, 300))
+    if response.status_code >= 400:
+        raise Exception(f"HTTP {response.status_code} — الرابط غير متاح")
+    total = int(response.headers.get("Content-Length") or 0)
+    downloaded = 0
+    last = 0.0
+    with open(file_name, "wb") as f:
+        for chunk in response.iter_content(chunk_size=1024*1024):
+            if chunk:
+                f.write(chunk)
+                downloaded += len(chunk)
+                if progress_callback and (time.time() - last >= 2 or downloaded >= total):
+                    last = time.time()
+                    try:
+                        progress_callback(downloaded, total)
+                    except Exception:
+                        pass
+    return file_name
+
+async def download_direct(url, status_msg):
+    loop = asyncio.get_event_loop()
+    dl_last = [0.0]
+    dl_start = [time.time()]
+
+    async def dl_progress(current, total):
+        now = time.time()
+        if now - dl_last[0] >= 3:
+            dl_last[0] = now
+            elapsed = now - dl_start[0]
+            speed = current / elapsed if elapsed > 0 else 1
+            if total:
+                percentage = current * 100 / total
+                eta = round((total - current) / speed) if speed > 0 else 0
+                filled = int(10 * current // total)
+                bar = '█' * filled + '░' * (10 - filled)
+                text = (
+                    f"⬇️ **جاري التنزيل المباشر...**\n\n"
+                    f"[{bar}] {percentage:.1f}%\n"
+                    f"🚀 **السرعة:** {humanbytes(speed)}/s\n"
+                    f"📦 **تم تنزيل:** {humanbytes(current)} / {humanbytes(total)}\n"
+                    f"⏱️ **المتبقي:** {eta}s"
+                )
+            else:
+                text = (
+                    f"⬇️ **جاري التنزيل المباشر...**\n\n"
+                    f"📦 **تم تنزيل:** {humanbytes(current)}\n"
+                    f"🚀 **السرعة:** {humanbytes(speed)}/s"
+                )
+            try:
+                await status_msg.edit_text(text)
+            except Exception:
+                pass
+
+    def thread_cb(current, total):
+        asyncio.run_coroutine_threadsafe(dl_progress(current, total), loop)
+
+    return await loop.run_in_executor(None, lambda: _download_direct_sync(url, thread_cb))
+
+# 🧭 الموجّه الذكي — يختار المحرك حسب نوع الرابط
+async def smart_download(url, status_msg):
+    if "gofile.io" in url:
+        await status_msg.edit_text("🦊 جاري تشغيل المتصفح الخفيف والتحميل من GoFile...")
+        return await download_from_gofile(url)
+    if "workupload.com" in url:
+        await status_msg.edit_text("🦊 جاري تشغيل المتصفح الخفيف والتحميل من WorkUpload...")
+        return await download_from_workupload(url)
+    if "mega.nz" in url or "mega.io" in url:
+        await status_msg.edit_text("⭕ جاري التحميل من MEGA (MEGA يشفّر الملفات — اصبر عليه)...")
+        return await download_mega_smart(url)
+    await status_msg.edit_text("⏳ جاري التنزيل المباشر...")
+    return await download_direct(url, status_msg)
+
+# ==========================================
+# 5. 🔘 لوحة التحكم (3 أوضاع)
+# ==========================================
+MODES_INFO = {
+    "link_to_file": "رابط ⬅️ ملف (تليجرام)",
+    "file_to_link": "ملف ⬅️ رابط (Buzzheavier)",
+    "link_to_link": "رابط ⬅️ رابط (Buzzheavier)",
+}
+
+def get_main_keyboard(current_mode):
+    rows = []
+    for m, label in MODES_INFO.items():
+        txt = f"✅ {label}" if current_mode == m else label
+        rows.append([InlineKeyboardButton(txt, callback_data=f"mode_{m}")])
+    return InlineKeyboardMarkup(rows)
 
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message: Message):
@@ -321,7 +499,10 @@ async def start_handler(client, message: Message):
     user_modes[message.chat.id] = user_modes.get(message.chat.id, "link_to_file")
     await message.reply_text(
         "أهلاً بك في البوت الشامل! 🚀\n\n"
-        "الرجاء اختيار الوضع المفضل للتعامل مع البوت من الأزرار أدناه:",
+        "📥 **رابط ⬅️ ملف:** أرسل رابطاً (GoFile/WorkUpload/MEGA/مباشر) واستلم الملف في تليجرام\n"
+        "🔗 **ملف ⬅️ رابط:** أرسل ملفاً واستلم رابط Buzzheavier\n"
+        "♻️ **رابط ⬅️ رابط:** أرسل أي رابط واستلم رابط Buzzheavier جديداً (بدون حد 2GB!)\n\n"
+        "اختر الوضع من الأزرار أدناه:",
         reply_markup=get_main_keyboard(user_modes[message.chat.id])
     )
 
@@ -329,24 +510,24 @@ async def start_handler(client, message: Message):
 async def mode_callback(client, callback: CallbackQuery):
     mode = callback.data.replace("mode_", "")
     user_modes[callback.message.chat.id] = mode
-    mode_msg = (
-        "الوضع الحالي: **تحويل الرابط إلى ملف وإرساله إليك** 📥"
-        if mode == "link_to_file"
-        else "الوضع الحالي: **تحويل الملف المرفوع إلى رابط Buzzheavier** 🔗"
-    )
+    descriptions = {
+        "link_to_file": "الوضع الحالي: **تحويل الرابط إلى ملف وإرساله إليك في تليجرام** 📥",
+        "file_to_link": "الوضع الحالي: **تحويل الملف المرفوع إلى رابط Buzzheavier** 🔗",
+        "link_to_link": "الوضع الحالي: **تحويل أي رابط إلى رابط Buzzheavier جديد** ♻️\n_(يدعم: GoFile + WorkUpload + MEGA + الروابط المباشرة)_",
+    }
     await callback.message.edit_text(
-        f"تم تغيير الوضع بنجاح! ✅\n\n{mode_msg}\n\nاختر العملية التي تريدها دائماً عبر الأزرار:",
+        f"تم تغيير الوضع بنجاح! ✅\n\n{descriptions.get(mode, '')}\n\nاختر الوضع الذي تريده دائماً عبر الأزرار:",
         reply_markup=get_main_keyboard(mode)
     )
     await callback.answer("تم حفظ الاختيار")
 
-# 📥 1. استقبال الروابط
+# 📥📥 استقبال الروابط (وضعا: رابط⬅️ملف + رابط⬅️رابط)
 @bot.on_message(filters.regex(r'https?://[^\s]+') & filters.private)
 async def handle_links(client, message: Message):
     mode = user_modes.get(message.chat.id, "link_to_file")
-    if mode != "link_to_file":
+    if mode == "file_to_link":
         await message.reply_text(
-            "⚠️ أنت في وضع **(ملف ⬅️ رابط)**. يرجى إرسال ملف أو التبديل إلى وضع **(رابط ⬅️ ملف)** من الأزرار بالأعلى."
+            "⚠️ أنت في وضع **(ملف ⬅️ رابط)**. أرسل ملفاً، أو بدّل إلى وضع 📥 أو ♻️ من الأزرار."
         )
         return
 
@@ -356,22 +537,34 @@ async def handle_links(client, message: Message):
     last_update = [0]
 
     try:
-        if "gofile.io" in url:
-            await status_msg.edit_text("🦊 جاري تشغيل المتصفح الخفيف والتحميل من GoFile...")
-            file_path = await download_from_gofile(url)
-        elif "workupload.com" in url:
-            await status_msg.edit_text("🦊 جاري تشغيل المتصفح الخفيف والتحميل من WorkUpload...")
-            file_path = await download_from_workupload(url)
-        else:
-            await status_msg.edit_text("⏳ جاري التنزيل المباشر...")
-            file_path = await download_direct(url, status_msg)
+        file_path = await smart_download(url, status_msg)
 
         if not file_path or not os.path.exists(file_path):
             raise Exception("تعذر تنزيل الملف، يرجى التأكد من الرابط.")
 
         local_size = os.path.getsize(file_path)
+
+        # ♻️ الوضع الجديد: رابط ⬅️ رابط Buzzheavier (بدون حد تليجرام)
+        if mode == "link_to_link":
+            await status_msg.edit_text(
+                f"🚀 تم التنزيل بنجاح ({humanbytes(local_size)})!\nجاري الرفع إلى **Buzzheavier**..."
+            )
+            buzz_link = await upload_to_buzz_with_progress(file_path, status_msg)
+            print(f"🔗 [رابط⬅️رابط] تم الرفع: {buzz_link}")
+            await status_msg.edit_text(
+                f"✅ **تم تحويل الرابط إلى رابط Buzzheavier بنجاح!**\n\n"
+                f"📁 **اسم الملف:** `{os.path.basename(file_path)}`\n"
+                f"📦 **الحجم:** `{humanbytes(local_size)}`\n\n"
+                f"🔗 **الرابط الجديد:**\n{buzz_link}"
+            )
+            return
+
+        # 📥 الوضع القديم: رابط ⬅️ ملف (تليجرام)
         if local_size > MAX_FILE_SIZE:
-            raise Exception(f"الملف كبير جداً ({humanbytes(local_size)}).")
+            raise Exception(
+                f"الملف كبير جداً لتليجرام ({humanbytes(local_size)}).\n"
+                f"💡 جرّب وضع ♻️ (رابط ⬅️ رابط) — لا يمر بتليجرام ولا حد عليه."
+            )
 
         await status_msg.edit_text(
             f"🚀 تم التنزيل بنجاح ({humanbytes(local_size)})!\nجاري الرفع إلى تليجرام..."
@@ -419,13 +612,14 @@ async def handle_links(client, message: Message):
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
-# 📤 2. استقبال الملفات → رفع إلى Buzzheavier
+# 📤 استقبال الملفات → رفع إلى Buzzheavier
 @bot.on_message((filters.document | filters.video | filters.audio) & filters.private)
 async def handle_files(client, message: Message):
     mode = user_modes.get(message.chat.id, "link_to_file")
     if mode != "file_to_link":
         await message.reply_text(
-            "⚠️ أنت في وضع **(رابط ⬅️ ملف)**. يرجى التبديل إلى وضع **(ملف ⬅️ رابط)** أولاً من قائمة الأزرار."
+            f"⚠️ أنت في وضع **({MODES_INFO.get(mode, 'رابط ⬅️ ملف')})** — أرسل رابطاً، "
+            f"أو بدّل إلى وضع 🔗 **(ملف ⬅️ رابط)** من الأزرار."
         )
         return
 
@@ -459,38 +653,8 @@ async def handle_files(client, message: Message):
         file_path = await message.download(progress=download_progress)
         await status_msg.edit_text("🚀 اكتمل التحميل من تليجرام! جاري الرفع إلى **Buzzheavier**...")
 
-        loop = asyncio.get_event_loop()
-        up_last = [0.0]
-        up_start = [time.time()]
-
-        async def upload_progress(current, total):
-            now = time.time()
-            if now - up_last[0] >= 3 and total:
-                up_last[0] = now
-                percentage = current * 100 / total
-                speed = current / (now - up_start[0]) if (now - up_start[0]) > 0 else 1
-                eta = round((total - current) / speed) if speed > 0 else 0
-                filled = int(10 * current // total)
-                bar = '█' * filled + '░' * (10 - filled)
-                text = (
-                    f"⬆️ **جاري الرفع إلى Buzzheavier...**\n\n"
-                    f"[{bar}] {percentage:.1f}%\n"
-                    f"🚀 **السرعة:** {humanbytes(speed)}/s\n"
-                    f"📦 **المرفوع:** {humanbytes(current)} / {humanbytes(total)}\n"
-                    f"⏱️ **المتبقي:** {eta}s"
-                )
-                try:
-                    await status_msg.edit_text(text)
-                except Exception:
-                    pass
-
-        def thread_progress(current, total):
-            asyncio.run_coroutine_threadsafe(upload_progress(current, total), loop)
-
-        buzz_link = await loop.run_in_executor(
-            None, lambda: upload_to_buzzheavier(file_path, thread_progress)
-        )
-        print(f"🔗 تم الرفع بنجاح: {buzz_link}")
+        buzz_link = await upload_to_buzz_with_progress(file_path, status_msg)
+        print(f"🔗 [ملف⬅️رابط] تم الرفع: {buzz_link}")
 
         file_name = os.path.basename(file_path)
         file_size = humanbytes(os.path.getsize(file_path))
@@ -508,24 +672,10 @@ async def handle_files(client, message: Message):
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
-async def download_direct(url, status_msg):
-    file_name = os.path.join(
-        DOWNLOAD_DIR,
-        url.split("/")[-1].split("?")[0] or "downloaded_file.bin"
-    )
-    session = requests.Session()
-    session.headers = {"User-Agent": "Mozilla/5.0"}
-    response = session.get(url, stream=True)
-    with open(file_name, 'wb') as f:
-        for chunk in response.iter_content(chunk_size=1024*1024):
-            if chunk:
-                f.write(chunk)
-    return file_name
-
 async def start_bot():
     try:
         await bot.start()
-        print("🟢 البوت يعمل — الرفع عبر Buzzheavier (روابط بصيغة buzzheavier.com/{id})")
+        print("🟢 البوت يعمل — 3 أوضاع: رابط⬅️ملف | ملف⬅️رابط | رابط⬅️رابط (مع دعم MEGA)")
         await idle()
     except Exception as e:
         print(f"⚠️ تنبيه أثناء التشغيل: {e}")
