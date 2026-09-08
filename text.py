@@ -104,7 +104,7 @@ async def keep_alive_ping():
             except Exception as e:
                 print(f"⚠️ تعذر إرسال الإشارة: {e}")
 
-# 🚀 دالة الرفع الجديدة إلى Buzzheavier (PUT Request)
+# 🚀 دالة الرفع إلى Buzzheavier واستخراج المعرف الصحيح
 def upload_to_buzzheavier(file_path):
     file_name = os.path.basename(file_path)
     url = f"https://w.buzzheavier.com/{file_name}"
@@ -113,11 +113,29 @@ def upload_to_buzzheavier(file_path):
         response = requests.put(url, data=f)
         
     if response.status_code in [200, 201]:
-        # يعيد الموقع رابط الملف أو الاستجابة المباشرة
         res_text = response.text.strip()
+        
         if res_text.startswith("http"):
             return res_text
-        return f"https://buzzheavier.com/{file_name}"
+        
+        try:
+            res_json = response.json()
+            if "url" in res_json:
+                return res_json["url"]
+            elif "id" in res_json:
+                return f"https://buzzheavier.com/{res_json['id']}"
+            elif "link" in res_json:
+                return res_json["link"]
+        except Exception:
+            pass
+        
+        if res_text:
+            clean_id = res_text.strip().splitlines()[0]
+            if not clean_id.startswith("http"):
+                return f"https://buzzheavier.com/{clean_id}"
+            return clean_id
+
+        raise Exception("لم يتم استلام رابط أو معرف صحيح من السيرفر.")
     else:
         raise Exception(f"فشل الرفع إلى Buzzheavier (رمز الاستجابة: {response.status_code}).")
 
