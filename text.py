@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 البوت الشامل - محرك تورنت يعمل بشكل صحيح
+🚀 البوت الشامل - مع محرك تورنت يعمل بشكل صحيح
 """
 
 # ==========================================
@@ -85,7 +85,6 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 user_chat_id = None
 ping_task = None
 user_modes = {}
-torrent_tasks = {}  # تتبع مهام التورنت
 
 bot = Client(
     f"bot_session_{int(time.time())}",
@@ -142,233 +141,109 @@ async def keep_alive_ping():
                 pass
 
 # ==========================================
-# 4. 🎯 محرك التورنت (تصحيح كامل)
+# 4. 🎯 محرك التورنت - استخدام libtorrent مباشرة
 # ==========================================
 
-class TorrentDownloader:
+async def download_torrent_with_libtorrent(url, status_msg):
     """
-    🎯 محمل التورنت - يستخدم libtorrent بشكل صحيح
+    🎯 تحميل التورنت باستخدام libtorrent بشكل صحيح
     """
-    
-    def __init__(self):
-        self.session = None
-        self.handle = None
-        self.is_running = False
-        self.progress = {
-            'state': 'idle',
-            'progress': 0,
-            'downloaded': 0,
-            'total': 0,
-            'speed': 0,
-            'peers': 0,
-            'seeds': 0,
-            'error': None,
-            'file_path': None
-        }
-        self.thread = None
-        self.stop_event = threading.Event()
-    
-    def start(self, url):
-        """بدء التحميل في thread منفصل"""
-        self.is_running = True
-        self.progress['state'] = 'starting'
-        self.progress['error'] = None
-        
-        self.thread = threading.Thread(target=self._download, args=(url,))
-        self.thread.daemon = True
-        self.thread.start()
-    
-    def _download(self, url):
-        """تحميل التورنت (يعمل في thread)"""
-        try:
-            print(f"🎯 [تورنت] بدء التحميل...")
-            
-            # إنشاء جلسة libtorrent
-            self.session = lt.session()
-            self.session.listen_on(6881, 6891)
-            
-            # إعداد معاملات التحميل
-            params = {
-                'save_path': DOWNLOAD_DIR,
-                'storage_mode': lt.storage_mode_t.storage_mode_sparse,
-            }
-            
-            # إضافة التورنت
-            if url.startswith('magnet:'):
-                print("🎯 [تورنت] إضافة رابط مغناطيسي...")
-                
-                # 🔧 تحليل الرابط المغناطيسي وإضافة trackers
-                trackers = []
-                for match in re.finditer(r'&tr=([^&]+)', url):
-                    tracker = urllib.parse.unquote(match.group(1))
-                    trackers.append(tracker)
-                
-                # إضافة trackers من الرابط
-                for tracker in trackers:
-                    try:
-                        self.session.add_tracker({'url': tracker, 'tier': 0})
-                        print(f"   📍 Tracker: {tracker}")
-                    except:
-                        pass
-                
-                # إضافة الرابط المغناطيسي
-                self.handle = lt.add_magnet_uri(self.session, url, params)
-                
-                # انتظار الميتاداتا
-                self.progress['state'] = 'fetching_metadata'
-                print("📡 [تورنت] انتظار الميتاداتا...")
-                
-                metadata_start = time.time()
-                while not self.handle.has_metadata():
-                    if self.stop_event.is_set():
-                        return
-                    if time.time() - metadata_start > 120:
-                        raise Exception("انتهت المهلة في انتظار الميتاداتا")
-                    time.sleep(0.5)
-                
-                print("✅ [تورنت] تم الحصول على الميتاداتا!")
-                
-            else:
-                # ملف .torrent
-                print("📁 [تورنت] تحميل ملف التورنت...")
-                response = requests.get(url, timeout=30)
-                temp_torrent = os.path.join(DOWNLOAD_DIR, 'temp.torrent')
-                with open(temp_torrent, 'wb') as f:
-                    f.write(response.content)
-                
-                info = lt.torrent_info(temp_torrent)
-                self.handle = self.session.add_torrent({'ti': info, **params})
-                os.remove(temp_torrent)
-            
-            self.progress['state'] = 'downloading'
-            print("⬇️ [تورنت] بدء التحميل...")
-            
-            # حلقة التحميل
-            while not self.stop_event.is_set():
-                status = self.handle.status()
-                
-                # تحديث البيانات
-                self.progress['progress'] = status.progress * 100
-                self.progress['downloaded'] = status.total_done
-                self.progress['total'] = status.total_wanted
-                self.progress['speed'] = status.download_payload_rate
-                self.progress['peers'] = status.num_peers
-                self.progress['seeds'] = status.num_seeds
-                
-                # طباعة التقدم
-                if int(time.time()) % 10 == 0:  # كل 10 ثواني
-                    print(f"   📊 {self.progress['progress']:.1f}% | "
-                          f"{humanbytes(self.progress['downloaded'])}/"
-                          f"{humanbytes(self.progress['total'])} | "
-                          f"{humanbytes(self.progress['speed'])}/s")
-                
-                # التحقق من الاكتمال
-                if status.is_seeding:
-                    self.progress['state'] = 'completed'
-                    print("✅ [تورنت] اكتمل التحميل!")
-                    
-                    # إيجاد الملف
-                    torrent_info = self.handle.torrent_file()
-                    if torrent_info:
-                        if torrent_info.num_files() == 1:
-                            file_path = os.path.join(
-                                DOWNLOAD_DIR, 
-                                torrent_info.file_at(0).path
-                            )
-                        else:
-                            # اختيار أكبر ملف
-                            largest = max(
-                                range(torrent_info.num_files()),
-                                key=lambda i: torrent_info.file_at(i).size
-                            )
-                            file_path = os.path.join(
-                                DOWNLOAD_DIR, 
-                                torrent_info.file_at(largest).path
-                            )
-                        
-                        if os.path.exists(file_path):
-                            self.progress['file_path'] = file_path
-                            print(f"📁 [تورنت] الملف: {file_path}")
-                    break
-                
-                time.sleep(1)
-            
-        except Exception as e:
-            self.progress['error'] = str(e)
-            self.progress['state'] = 'error'
-            print(f"❌ [تورنت] خطأ: {e}")
-        finally:
-            self.is_running = False
-    
-    def stop(self):
-        """إيقاف التحميل"""
-        self.stop_event.set()
-        if self.thread:
-            self.thread.join(timeout=5)
-    
-    def get_progress(self):
-        """الحصول على التقدم الحالي"""
-        return dict(self.progress)
-
-async def download_from_torrent(url, status_msg):
-    """
-    🎯 تحميل التورنت مع شريط تقدم (لا يسد event loop)
-    """
-    downloader = TorrentDownloader()
+    session = None
+    handle = None
     
     try:
-        print(f"🌐 [تورنت] الرابط: {url[:80]}")
+        print(f"🎯 [تورنت] بدء تحميل: {url[:80]}")
         
-        # بدء التحميل في الخلفية
-        downloader.start(url)
+        # إنشاء جلسة libtorrent
+        session = lt.session()
+        session.listen_on(6881, 6891)
         
-        # 🔧 حلقة تحديث الواجهة - لا تسد event loop!
+        # إعداد معاملات التحميل
+        params = {
+            'save_path': DOWNLOAD_DIR,
+            'storage_mode': lt.storage_mode_t.storage_mode_sparse,
+        }
+        
+        # إضافة التورنت
+        if url.startswith('magnet:'):
+            print("🎯 [تورنت] إضافة رابط مغناطيسي...")
+            
+            # 🔧 إضافة trackers يدوياً من الرابط
+            trackers = []
+            for match in re.finditer(r'&tr=([^&]+)', url):
+                tracker = urllib.parse.unquote(match.group(1))
+                trackers.append(tracker)
+            
+            # إضافة trackers إلى الجلسة
+            for tracker in trackers:
+                try:
+                    session.add_tracker({'url': tracker, 'tier': 0})
+                    print(f"   📍 Tracker: {tracker}")
+                except:
+                    pass
+            
+            # إضافة الرابط المغناطيسي
+            handle = lt.add_magnet_uri(session, url, params)
+            
+            # 🔧 انتظار الميتاداتا - استخدام حلقة منفصلة
+            await status_msg.edit_text(
+                "📡 **جاري الحصول على معلومات التورنت...**\n\n"
+                "⏳ **الرجاء الانتظار...**"
+            )
+            
+            metadata_start = time.time()
+            while not handle.has_metadata():
+                if time.time() - metadata_start > 120:
+                    raise Exception("انتهت المهلة في انتظار الميتاداتا")
+                
+                # 🔧 استخدام await بدلاً من time.sleep
+                await asyncio.sleep(1)
+            
+            print("✅ [تورنت] تم الحصول على الميتاداتا!")
+            
+        else:
+            # ملف .torrent
+            print("📁 [تورنت] تحميل ملف التورنت...")
+            response = requests.get(url, timeout=30)
+            temp_torrent = os.path.join(DOWNLOAD_DIR, 'temp.torrent')
+            with open(temp_torrent, 'wb') as f:
+                f.write(response.content)
+            
+            info = lt.torrent_info(temp_torrent)
+            handle = session.add_torrent({'ti': info, **params})
+            os.remove(temp_torrent)
+        
+        # 🔧 بدء التحميل - استخدام حلقة مع تحديث التقدم
+        print("⬇️ [تورنت] بدء التحميل...")
+        
         start_time = time.time()
         last_update = 0
         update_count = 0
         
-        while downloader.is_running or downloader.progress['state'] in ['starting', 'fetching_metadata']:
-            # التحقق من الخطأ
-            if downloader.progress['error']:
-                raise Exception(f"فشل التورنت: {downloader.progress['error']}")
+        while True:
+            # الحصول على الحالة
+            status = handle.status()
+            
+            # حساب المعلومات
+            progress = status.progress * 100
+            downloaded = status.total_done
+            total = status.total_wanted
+            speed = status.download_payload_rate
+            peers = status.num_peers
+            seeds = status.num_seeds
             
             # التحقق من الاكتمال
-            if downloader.progress['state'] == 'completed':
+            if status.is_seeding:
+                print("✅ [تورنت] اكتمل التحميل!")
                 break
             
-            # الحصول على المعلومات
-            progress_data = downloader.get_progress()
-            
-            # تحديث الرسالة كل 2 ثواني (ليس كل 3)
+            # تحديث الرسالة كل 3 ثواني
             now = time.time()
-            if now - last_update >= 2:
+            if now - last_update >= 3:
                 last_update = now
                 update_count += 1
                 
-                # إنشاء النص
-                state = progress_data['state']
-                state_emoji = {
-                    'starting': '🚀',
-                    'fetching_metadata': '📡',
-                    'downloading': '⬇️',
-                    'completed': '✅'
-                }.get(state, '⏳')
-                
-                state_text = {
-                    'starting': 'جاري البدء...',
-                    'fetching_metadata': 'جاري الحصول على المعلومات...',
-                    'downloading': 'جاري التحميل...',
-                    'completed': 'اكتمل التحميل!'
-                }.get(state, 'جاري...')
-                
-                progress = progress_data['progress']
-                downloaded = progress_data['downloaded']
-                total = progress_data['total']
-                speed = progress_data['speed']
-                peers = progress_data['peers']
-                seeds = progress_data['seeds']
-                
-                # شريط التقدم
+                # إنشاء شريط التقدم
                 if total > 0:
                     filled = int(20 * progress / 100)
                     bar = '█' * filled + '░' * (20 - filled)
@@ -385,9 +260,9 @@ async def download_from_torrent(url, status_msg):
                 
                 elapsed = int(time.time() - start_time)
                 
+                # إنشاء النص
                 text = (
                     f"🎯 **تحميل التورنت**\n\n"
-                    f"{state_emoji} **الحالة:** {state_text}\n"
                     f"[{bar}] {progress:.1f}%\n\n"
                     f"📦 **تم تحميل:** {humanbytes(downloaded)} / {humanbytes(total)}\n"
                     f"🚀 **السرعة:** {humanbytes(speed)}/s\n"
@@ -397,59 +272,70 @@ async def download_from_torrent(url, status_msg):
                     f"⏳ **الوقت:** {elapsed}s"
                 )
                 
-                # 🔧 محاولة تحديث الرسالة
+                # محاولة تحديث الرسالة
                 try:
                     await status_msg.edit_text(text)
                     
-                    # طباعة في console
-                    if update_count % 5 == 0:  # كل 10 ثواني
-                        print(f"   📊 [{update_count}] {progress:.1f}% | "
+                    # طباعة في console كل 5 تحديثات
+                    if update_count % 5 == 0:
+                        print(f"   📊 {progress:.1f}% | "
                               f"{humanbytes(downloaded)}/{humanbytes(total)} | "
                               f"{humanbytes(speed)}/s")
                     
                 except Exception as e:
                     # إذا فشل التحديث، استمر
-                    print(f"   ⚠️ تحديث فشل: {e}")
                     pass
             
-            # 🔧 مهم جداً: استخدام yield لإعطاء فرصة لـ Pyrogram
-            await asyncio.sleep(0.5)
+            # 🔧 مهم: استخدام await asyncio.sleep(1) يسمح لـ Pyrogram بالعمل
+            await asyncio.sleep(1)
         
-        # التحقق من النتيجة النهائية
-        if downloader.progress['error']:
-            raise Exception(f"فشل التورنت: {downloader.progress['error']}")
-        
-        # الحصول على الملف
-        file_path = downloader.progress.get('file_path')
-        
-        if file_path and os.path.exists(file_path):
-            # التحقق من حجم الملف
-            file_size = os.path.getsize(file_path)
-            if file_size > 0:
-                print(f"✅ [تورنت] نجح: {file_path} ({humanbytes(file_size)})")
-                return file_path
+        # إيجاد الملف المحمل
+        torrent_info = handle.torrent_file()
+        if torrent_info:
+            if torrent_info.num_files() == 1:
+                file_path = os.path.join(DOWNLOAD_DIR, torrent_info.file_at(0).path)
             else:
-                raise Exception("الملف فارغ")
-        else:
-            # البحث عن ملفات في المجلد
-            files = [f for f in os.listdir(DOWNLOAD_DIR) if f not in ['temp.torrent']]
-            if files:
-                latest_file = max(
-                    files, 
-                    key=lambda x: os.path.getmtime(os.path.join(DOWNLOAD_DIR, x))
-                )
-                file_path = os.path.join(DOWNLOAD_DIR, latest_file)
-                if os.path.getsize(file_path) > 0:
-                    return file_path
+                # اختيار أكبر ملف
+                largest_idx = 0
+                largest_size = 0
+                for i in range(torrent_info.num_files()):
+                    file_size = torrent_info.file_at(i).size
+                    if file_size > largest_size:
+                        largest_size = file_size
+                        largest_idx = i
+                file_path = os.path.join(DOWNLOAD_DIR, torrent_info.file_at(largest_idx).path)
             
-            raise Exception("لم يتم العثور على الملف")
+            if os.path.exists(file_path):
+                file_size = os.path.getsize(file_path)
+                if file_size > 0:
+                    print(f"✅ [تورنت] الملف: {file_path} ({humanbytes(file_size)})")
+                    return file_path
+                else:
+                    raise Exception("الملف فارغ")
+            else:
+                # البحث في المجلد
+                files = [f for f in os.listdir(DOWNLOAD_DIR) if f not in ['temp.torrent']]
+                if files:
+                    latest_file = max(files, key=lambda x: os.path.getmtime(os.path.join(DOWNLOAD_DIR, x)))
+                    file_path = os.path.join(DOWNLOAD_DIR, latest_file)
+                    if os.path.getsize(file_path) > 0:
+                        return file_path
+                
+                raise Exception("لم يتم العثور على الملف")
+        else:
+            raise Exception("لم يتم العثور على معلومات التورنت")
         
     except Exception as e:
-        print(f"❌ [تورنت] خطأ نهائي: {e}")
-        downloader.stop()
+        print(f"❌ [تورنت] خطأ: {e}")
         raise Exception(f"فشل التورنت: {str(e)}")
     finally:
-        downloader.stop()
+        # تنظيف
+        if session:
+            try:
+                if handle:
+                    session.remove_torrent(handle)
+            except:
+                pass
 
 # ==========================================
 # 5. 📥 محرك MEGA
@@ -486,10 +372,7 @@ async def download_from_mega(url, status_msg):
         # البحث عن الملف
         files = [f for f in os.listdir(DOWNLOAD_DIR) if f not in ['temp.torrent']]
         if files:
-            latest_file = max(
-                files, 
-                key=lambda x: os.path.getmtime(os.path.join(DOWNLOAD_DIR, x))
-            )
+            latest_file = max(files, key=lambda x: os.path.getmtime(os.path.join(DOWNLOAD_DIR, x)))
             file_path = os.path.join(DOWNLOAD_DIR, latest_file)
             
             if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
@@ -744,7 +627,7 @@ async def smart_download(url, status_msg):
     url_lower = url.lower()
     
     if url.startswith('magnet:') or url.endswith('.torrent'):
-        return await download_from_torrent(url, status_msg)
+        return await download_torrent_with_libtorrent(url, status_msg)
     
     if 'mega.nz' in url_lower or 'mega.io' in url_lower:
         return await download_from_mega(url, status_msg)
@@ -1105,8 +988,7 @@ async def start_bot():
         await bot.start()
         print("🟢 البوت يعمل!")
         print("✅ المصادر: WorkUpload | GoFile | MEGA | تورنت | مباشر")
-        print("🎯 محرك التورنت: يعمل في خلفية منفصلة")
-        print("📊 شريط التقدم: يعمل بشكل صحيح")
+        print("🎯 محرك التورنت: يستخدم libtorrent مباشرة")
         await idle()
     except Exception as e:
         print(f"⚠️ خطأ: {e}")
