@@ -1,60 +1,34 @@
 # -*- coding: utf-8 -*-
-"""
-🚀 البوت الشامل - WorkUpload + GoFile + تورنت + Buzzheavier
-"""
+# 🚀 البوت الشامل - نسخة مصححة
+# ==========================================
 
-# ==========================================
-# 1. تثبيت المكتبات (مصحح لملف .py)
-# ==========================================
+# 1. تثبيت المكتبات
 import subprocess
 import sys
 
-def install_packages():
-    """تثبيت جميع المكتبات المطلوبة"""
-    packages = [
-        'pyrogram', 
-        'tgcrypto', 
-        'nest_asyncio', 
-        'requests', 
-        'playwright', 
-        'libtorrent'
-    ]
-    
-    print("📦 تثبيت المكتبات...")
-    
-    for package in packages:
-        try:
-            __import__(package)
-            print(f"✅ {package} مثبت")
-        except ImportError:
-            print(f"📥 تثبيت {package}...")
-            subprocess.check_call([
-                sys.executable, '-m', 'pip', 'install', 
-                package, '-q'
-            ])
-    
-    # تثبيت Firefox
-    print("🦊 تثبيت Firefox...")
-    subprocess.run(['playwright', 'install', 'firefox'], check=True)
-    subprocess.run(['playwright', 'install-deps', 'firefox'], check=True)
-    
-    # تثبيت aria2
-    print("⚙️ تثبيت aria2...")
-    subprocess.run([
-        'apt-get', 'update', '-qq'
-    ], capture_output=True)
-    subprocess.run([
-        'apt-get', 'install', '-y', '-qq', 'aria2'
-    ], capture_output=True)
-    
-    print("✅ تم تثبيت جميع المكتبات")
+print("📦 تثبيت المكتبات...")
 
-# تشغيل التثبيت
-install_packages()
+packages = ['pyrogram', 'tgcrypto', 'nest_asyncio', 'requests', 'playwright', 'libtorrent']
 
-# ==========================================
+for package in packages:
+    try:
+        __import__(package)
+        print(f"✅ {package} مثبت")
+    except ImportError:
+        print(f"📥 تثبيت {package}...")
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', package, '-q'])
+
+print("🦊 تثبيت Firefox...")
+subprocess.run(['playwright', 'install', 'firefox'], check=True)
+subprocess.run(['playwright', 'install-deps', 'firefox'], check=True)
+
+print("⚙️ تثبيت aria2...")
+subprocess.run(['apt-get', 'update', '-qq'], capture_output=True)
+subprocess.run(['apt-get', 'install', '-y', '-qq', 'aria2'], capture_output=True)
+
+print("✅ تم تثبيت جميع المكتبات")
+
 # 2. الاستيرادات
-# ==========================================
 import nest_asyncio
 nest_asyncio.apply()
 
@@ -73,11 +47,9 @@ from playwright.async_api import async_playwright
 import libtorrent as lt
 
 gc.collect()
-print("✅ جميع المكتبات مثبتة وجاهزة")
+print("✅ جميع المكتبات جاهزة")
 
-# ==========================================
 # 3. الإعدادات
-# ==========================================
 API_ID = int(userdata.get('API_ID').strip())
 API_HASH = userdata.get('API_HASH').strip()
 BOT_TOKEN = userdata.get('BOT_TOKEN').strip()
@@ -120,9 +92,6 @@ async def keep_alive_ping():
 # 4. محرك WorkUpload
 # ==========================================
 async def download_from_workupload(url, status_msg):
-    """
-    📥 تحميل من WorkUpload
-    """
     try:
         async with async_playwright() as p:
             browser = await p.firefox.launch(headless=True)
@@ -130,11 +99,9 @@ async def download_from_workupload(url, status_msg):
             page = await context.new_page()
             
             try:
-                # فتح الصفحة
                 await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                 await page.wait_for_timeout(5000)
                 
-                # البحث عن رابط البدء
                 links = await page.evaluate("""
                     () => {
                         const allLinks = [];
@@ -158,11 +125,9 @@ async def download_from_workupload(url, status_msg):
                     file_id = url.split('/')[-1]
                     start_url = f"https://workupload.com/start/{file_id}"
                 
-                # فتح صفحة البدء
                 await page.goto(start_url, wait_until="domcontentloaded", timeout=60000)
                 await page.wait_for_timeout(10000)
                 
-                # البحث عن زر التحميل
                 selectors = [
                     "a[href*='download']",
                     "a:has-text('Download')",
@@ -232,9 +197,6 @@ async def download_from_workupload(url, status_msg):
 # 5. محرك GoFile
 # ==========================================
 async def download_from_gofile(url, status_msg):
-    """
-    📥 تحميل من GoFile
-    """
     try:
         async with async_playwright() as p:
             browser = await p.firefox.launch(headless=True)
@@ -307,9 +269,6 @@ async def download_from_gofile(url, status_msg):
 # 6. محرك التورنت
 # ==========================================
 async def download_from_torrent(url, status_msg):
-    """
-    🎯 تحميل من التورنت
-    """
     try:
         session = lt.session()
         session.listen_on(6881, 6891)
@@ -341,14 +300,12 @@ async def download_from_torrent(url, status_msg):
             handle = session.add_torrent({'ti': info, **params})
             os.remove(temp_torrent)
         
-        # انتظار معلومات التورنت
         start_time = time.time()
         while not handle.has_metadata():
             if time.time() - start_time > 120:
                 raise Exception("انتهت المهلة في انتظار معلومات التورنت")
             await asyncio.sleep(1)
         
-        # التحميل مع شريط التقدم
         last_update = 0
         
         while True:
@@ -402,9 +359,6 @@ async def download_from_torrent(url, status_msg):
 # 7. التحميل المباشر
 # ==========================================
 async def download_direct(url, status_msg):
-    """
-    📥 تحميل مباشر
-    """
     filename = url.split("/")[-1].split("?")[0] or "downloaded_file.bin"
     file_path = os.path.join(DOWNLOAD_DIR, filename)
     
@@ -471,9 +425,6 @@ async def download_direct(url, status_msg):
 # 8. الموجه الذكي
 # ==========================================
 async def smart_download(url, status_msg):
-    """
-    🧭 اختيار المحرك المناسب
-    """
     url_lower = url.lower()
     
     if url.startswith('magnet:') or url.endswith('.torrent'):
@@ -559,9 +510,6 @@ def upload_to_buzzheavier(file_path, progress_callback=None):
             body.close()
 
 async def upload_to_buzz_with_progress(file_path, status_msg):
-    """
-    ⬆️ الرفع مع شريط تقدم
-    """
     loop = asyncio.get_event_loop()
     up_start = [time.time()]
     
@@ -804,6 +752,5 @@ async def start_bot():
     finally:
         await bot.stop()
 
-if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(start_bot())
+loop = asyncio.get_event_loop()
+loop.run_until_complete(start_bot())
