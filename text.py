@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-🚀 البوت الشامل - مع محرك تورنت يعمل بشكل صحيح
+🚀 البوت الشامل - باستخدام كود التورنت الذي يعمل
 """
 
 # ==========================================
@@ -8,37 +8,29 @@
 # ==========================================
 import subprocess
 import sys
+import os
 
-def install_packages():
+def install_all():
     packages = [
-        'pyrogram', 
-        'tgcrypto', 
-        'nest_asyncio', 
-        'requests', 
-        'playwright', 
-        'libtorrent',
-        'python-magic'
+        'pyrogram', 'tgcrypto', 'nest_asyncio', 'requests', 
+        'playwright', 'libtorrent', 'python-magic', 'tqdm'
     ]
-    
-    print("📦 تثبيت المكتبات...")
     
     for package in packages:
         try:
             __import__(package)
         except ImportError:
             subprocess.check_call([
-                sys.executable, '-m', 'pip', 'install', 
-                package, '-q'
+                sys.executable, '-m', 'pip', 'install', '-q', package
             ])
     
     subprocess.run(['playwright', 'install', 'firefox'], check=True)
     subprocess.run(['playwright', 'install-deps', 'firefox'], check=True)
     subprocess.run(['apt-get', 'update', '-qq'], capture_output=True)
-    subprocess.run(['apt-get', 'install', '-y', '-qq', 'megatools', 'aria2'], capture_output=True)
-    
+    subprocess.run(['apt-get', 'install', '-y', '-qq', 'megatools', 'aria2', 'ffmpeg'], capture_output=True)
     print("✅ تم تثبيت جميع المكتبات")
 
-install_packages()
+install_all()
 
 # ==========================================
 # 2. الاستيرادات
@@ -46,14 +38,11 @@ install_packages()
 import nest_asyncio
 nest_asyncio.apply()
 
-import os
 import time
 import math
 import asyncio
 import threading
-import subprocess
 import re
-import urllib.parse
 import gc
 import mimetypes
 import requests
@@ -104,7 +93,6 @@ def humanbytes(size):
     return f"{s} {size_name[i]}"
 
 def detect_file_type(file_path):
-    """🔍 كشف نوع الملف"""
     try:
         if HAS_MAGIC:
             with open(file_path, 'rb') as f:
@@ -112,14 +100,12 @@ def detect_file_type(file_path):
             mime = magic.from_buffer(header, mime=True)
             if mime:
                 return mime
-        
         mime, _ = mimetypes.guess_type(file_path)
         return mime or "application/octet-stream"
     except:
         return "application/octet-stream"
 
 def get_file_category(file_path):
-    """📂 تحديد فئة الملف"""
     mime_type = detect_file_type(file_path)
     if mime_type.startswith('video/'):
         return "video", "🎬"
@@ -141,107 +127,171 @@ async def keep_alive_ping():
                 pass
 
 # ==========================================
-# 4. 🎯 محرك التورنت - استخدام libtorrent مباشرة
+# 4. 🎯 محرك التورنت - الكود الذي يعمل!
 # ==========================================
 
-async def download_torrent_with_libtorrent(url, status_msg):
+def download_torrent_sync(link, output_dir="./downloads"):
     """
-    🎯 تحميل التورنت باستخدام libtorrent بشكل صحيح
+    🎯 تحميل التورنت (الكود الأصلي الذي يعمل)
     """
-    session = None
-    handle = None
+    os.makedirs(output_dir, exist_ok=True)
     
-    try:
-        print(f"🎯 [تورنت] بدء تحميل: {url[:80]}")
+    # إعداد جلسة التورنت
+    ses = lt.session({'listen_interfaces': '0.0.0.0:6881'})
+    
+    print("🧲 جاري إضافة رابط التورنت وسحب البيانات...")
+    
+    # 🔧 استخدام parse_magnet_uri (مثل الكود الأصلي)
+    params = lt.parse_magnet_uri(link)
+    params.save_path = output_dir
+    handle = ses.add_torrent(params)
+    
+    # انتظار سحب البيانات (Metadata)
+    while not handle.has_metadata():
+        time.sleep(1)
+    
+    tor_info = handle.get_torrent_info()
+    print(f"📦 الاسم: {tor_info.name()}")
+    print(f"💾 الحجم الإجمالي: {tor_info.total_size() / (1024*1024):.2f} MB\n")
+    
+    # بدء التحميل وعرض النسبة المئوية
+    print("⚡ بدأ التحميل:")
+    while not handle.status().is_seeding:
+        s = handle.status()
+        pct = s.progress * 100
+        dl_rate = s.download_rate / 1024
+        peers = s.num_peers
+        seeds = s.num_seeds
         
-        # إنشاء جلسة libtorrent
-        session = lt.session()
-        session.listen_on(6881, 6891)
-        
-        # إعداد معاملات التحميل
-        params = {
-            'save_path': DOWNLOAD_DIR,
-            'storage_mode': lt.storage_mode_t.storage_mode_sparse,
-        }
-        
-        # إضافة التورنت
-        if url.startswith('magnet:'):
-            print("🎯 [تورنت] إضافة رابط مغناطيسي...")
+        print(f"\r[►] {pct:5.1f}%  |  السرعة: {dl_rate:.1f} KB/s  |  القرناء: {peers}  |  البذور: {seeds}  ", end="", flush=True)
+        time.sleep(1)
+    
+    print("\n\n✅ اكتمل تحميل التورنت بنجاح!")
+    return os.path.join(output_dir, tor_info.name())
+
+async def download_torrent_with_progress(link, status_msg):
+    """
+    🎯 تحميل التورنت مع تحديث التقدم في تليجرام
+    """
+    # متغيرات لتتبع التقدم
+    progress_data = {
+        'state': 'starting',
+        'progress': 0,
+        'name': '',
+        'total_size': 0,
+        'downloaded': 0,
+        'speed': 0,
+        'peers': 0,
+        'seeds': 0,
+        'completed': False,
+        'error': None
+    }
+    
+    def torrent_worker():
+        """
+        🔧 تشغيل التورنت في thread منفصل (الكود الأصلي)
+        """
+        try:
+            os.makedirs(DOWNLOAD_DIR, exist_ok=True)
             
-            # 🔧 إضافة trackers يدوياً من الرابط
-            trackers = []
-            for match in re.finditer(r'&tr=([^&]+)', url):
-                tracker = urllib.parse.unquote(match.group(1))
-                trackers.append(tracker)
+            # إعداد جلسة التورنت
+            ses = lt.session({'listen_interfaces': '0.0.0.0:6881'})
             
-            # إضافة trackers إلى الجلسة
-            for tracker in trackers:
-                try:
-                    session.add_tracker({'url': tracker, 'tier': 0})
-                    print(f"   📍 Tracker: {tracker}")
-                except:
-                    pass
-            
-            # إضافة الرابط المغناطيسي
-            handle = lt.add_magnet_uri(session, url, params)
-            
-            # 🔧 انتظار الميتاداتا - استخدام حلقة منفصلة
-            await status_msg.edit_text(
-                "📡 **جاري الحصول على معلومات التورنت...**\n\n"
-                "⏳ **الرجاء الانتظار...**"
-            )
-            
-            metadata_start = time.time()
-            while not handle.has_metadata():
-                if time.time() - metadata_start > 120:
-                    raise Exception("انتهت المهلة في انتظار الميتاداتا")
+            # 🔧 استخدام parse_magnet_uri (مثل الكود الأصلي)
+            if link.startswith('magnet:'):
+                params = lt.parse_magnet_uri(link)
+            else:
+                # ملف .torrent
+                response = requests.get(link, timeout=30)
+                temp_torrent = os.path.join(DOWNLOAD_DIR, 'temp.torrent')
+                with open(temp_torrent, 'wb') as f:
+                    f.write(response.content)
                 
-                # 🔧 استخدام await بدلاً من time.sleep
-                await asyncio.sleep(1)
+                info = lt.torrent_info(temp_torrent)
+                params = lt.add_torrent_params()
+                params.ti = info
+                os.remove(temp_torrent)
             
-            print("✅ [تورنت] تم الحصول على الميتاداتا!")
+            params.save_path = DOWNLOAD_DIR
+            handle = ses.add_torrent(params)
             
-        else:
-            # ملف .torrent
-            print("📁 [تورنت] تحميل ملف التورنت...")
-            response = requests.get(url, timeout=30)
-            temp_torrent = os.path.join(DOWNLOAD_DIR, 'temp.torrent')
-            with open(temp_torrent, 'wb') as f:
-                f.write(response.content)
+            progress_data['state'] = 'fetching_metadata'
             
-            info = lt.torrent_info(temp_torrent)
-            handle = session.add_torrent({'ti': info, **params})
-            os.remove(temp_torrent)
+            # انتظار سحب البيانات (Metadata)
+            while not handle.has_metadata():
+                time.sleep(1)
+            
+            tor_info = handle.get_torrent_info()
+            progress_data['name'] = tor_info.name()
+            progress_data['total_size'] = tor_info.total_size()
+            
+            print(f"📦 [تورنت] الاسم: {tor_info.name()}")
+            print(f"💾 [تورنت] الحجم: {tor_info.total_size() / (1024*1024):.2f} MB")
+            
+            progress_data['state'] = 'downloading'
+            
+            # بدء التحميل
+            while not handle.status().is_seeding:
+                s = handle.status()
+                
+                progress_data['progress'] = s.progress * 100
+                progress_data['downloaded'] = s.total_done
+                progress_data['total'] = s.total_wanted
+                progress_data['speed'] = s.download_rate
+                progress_data['peers'] = s.num_peers
+                progress_data['seeds'] = s.num_seeds
+                
+                time.sleep(1)
+            
+            progress_data['completed'] = True
+            progress_data['state'] = 'completed'
+            progress_data['file_path'] = os.path.join(DOWNLOAD_DIR, tor_info.name())
+            
+            print(f"\n✅ [تورنت] اكتمل التحميل: {progress_data['file_path']}")
+            
+        except Exception as e:
+            progress_data['error'] = str(e)
+            progress_data['state'] = 'error'
+            print(f"❌ [تورنت] خطأ: {e}")
+    
+    # 🔧 بدء التورنت في thread منفصل
+    torrent_thread = threading.Thread(target=torrent_worker)
+    torrent_thread.daemon = True
+    torrent_thread.start()
+    
+    # 🔧 حلقة تحديث الرسالة (async - لا تسد event loop)
+    start_time = time.time()
+    last_update = 0
+    
+    while True:
+        # التحقق من الخطأ
+        if progress_data['error']:
+            raise Exception(f"فشل التورنت: {progress_data['error']}")
         
-        # 🔧 بدء التحميل - استخدام حلقة مع تحديث التقدم
-        print("⬇️ [تورنت] بدء التحميل...")
+        # التحقق من الاكتمال
+        if progress_data['completed']:
+            break
         
-        start_time = time.time()
-        last_update = 0
-        update_count = 0
-        
-        while True:
-            # الحصول على الحالة
-            status = handle.status()
+        # تحديث الرسالة كل 3 ثواني
+        now = time.time()
+        if now - last_update >= 3:
+            last_update = now
             
-            # حساب المعلومات
-            progress = status.progress * 100
-            downloaded = status.total_done
-            total = status.total_wanted
-            speed = status.download_payload_rate
-            peers = status.num_peers
-            seeds = status.num_seeds
+            state = progress_data['state']
             
-            # التحقق من الاكتمال
-            if status.is_seeding:
-                print("✅ [تورنت] اكتمل التحميل!")
-                break
-            
-            # تحديث الرسالة كل 3 ثواني
-            now = time.time()
-            if now - last_update >= 3:
-                last_update = now
-                update_count += 1
+            if state == 'fetching_metadata':
+                text = (
+                    f"🎯 **تحميل التورنت**\n\n"
+                    f"📡 **جاري الحصول على معلومات التورنت...**\n"
+                    f"⏳ **الرجاء الانتظار...**"
+                )
+            elif state == 'downloading':
+                progress = progress_data['progress']
+                downloaded = progress_data['downloaded']
+                total = progress_data['total']
+                speed = progress_data['speed']
+                peers = progress_data['peers']
+                seeds = progress_data['seeds']
                 
                 # إنشاء شريط التقدم
                 if total > 0:
@@ -249,7 +299,6 @@ async def download_torrent_with_libtorrent(url, status_msg):
                     bar = '█' * filled + '░' * (20 - filled)
                 else:
                     bar = '░' * 20
-                    progress = 0
                 
                 # حساب الوقت المتبقي
                 if speed > 0:
@@ -260,9 +309,9 @@ async def download_torrent_with_libtorrent(url, status_msg):
                 
                 elapsed = int(time.time() - start_time)
                 
-                # إنشاء النص
                 text = (
                     f"🎯 **تحميل التورنت**\n\n"
+                    f"📁 **الاسم:** `{progress_data['name']}`\n"
                     f"[{bar}] {progress:.1f}%\n\n"
                     f"📦 **تم تحميل:** {humanbytes(downloaded)} / {humanbytes(total)}\n"
                     f"🚀 **السرعة:** {humanbytes(speed)}/s\n"
@@ -271,82 +320,44 @@ async def download_torrent_with_libtorrent(url, status_msg):
                     f"👥 **الأقران:** {peers}\n"
                     f"⏳ **الوقت:** {elapsed}s"
                 )
-                
-                # محاولة تحديث الرسالة
-                try:
-                    await status_msg.edit_text(text)
-                    
-                    # طباعة في console كل 5 تحديثات
-                    if update_count % 5 == 0:
-                        print(f"   📊 {progress:.1f}% | "
-                              f"{humanbytes(downloaded)}/{humanbytes(total)} | "
-                              f"{humanbytes(speed)}/s")
-                    
-                except Exception as e:
-                    # إذا فشل التحديث، استمر
-                    pass
-            
-            # 🔧 مهم: استخدام await asyncio.sleep(1) يسمح لـ Pyrogram بالعمل
-            await asyncio.sleep(1)
-        
-        # إيجاد الملف المحمل
-        torrent_info = handle.torrent_file()
-        if torrent_info:
-            if torrent_info.num_files() == 1:
-                file_path = os.path.join(DOWNLOAD_DIR, torrent_info.file_at(0).path)
             else:
-                # اختيار أكبر ملف
-                largest_idx = 0
-                largest_size = 0
-                for i in range(torrent_info.num_files()):
-                    file_size = torrent_info.file_at(i).size
-                    if file_size > largest_size:
-                        largest_size = file_size
-                        largest_idx = i
-                file_path = os.path.join(DOWNLOAD_DIR, torrent_info.file_at(largest_idx).path)
+                text = f"🎯 **تحميل التورنت**\n\n⏳ **جاري البدء...**"
             
-            if os.path.exists(file_path):
-                file_size = os.path.getsize(file_path)
-                if file_size > 0:
-                    print(f"✅ [تورنت] الملف: {file_path} ({humanbytes(file_size)})")
-                    return file_path
-                else:
-                    raise Exception("الملف فارغ")
-            else:
-                # البحث في المجلد
-                files = [f for f in os.listdir(DOWNLOAD_DIR) if f not in ['temp.torrent']]
-                if files:
-                    latest_file = max(files, key=lambda x: os.path.getmtime(os.path.join(DOWNLOAD_DIR, x)))
-                    file_path = os.path.join(DOWNLOAD_DIR, latest_file)
-                    if os.path.getsize(file_path) > 0:
-                        return file_path
-                
-                raise Exception("لم يتم العثور على الملف")
-        else:
-            raise Exception("لم يتم العثور على معلومات التورنت")
-        
-    except Exception as e:
-        print(f"❌ [تورنت] خطأ: {e}")
-        raise Exception(f"فشل التورنت: {str(e)}")
-    finally:
-        # تنظيف
-        if session:
+            # محاولة تحديث الرسالة
             try:
-                if handle:
-                    session.remove_torrent(handle)
-            except:
+                await status_msg.edit_text(text)
+                print(f"   📊 [{state}] {progress_data.get('progress', 0):.1f}%")
+            except Exception:
                 pass
+        
+        # 🔧 انتظار قصير - لا يسد event loop
+        await asyncio.sleep(1)
+    
+    # الحصول على الملف
+    file_path = progress_data.get('file_path')
+    
+    if file_path and os.path.exists(file_path):
+        # إذا كان مجلد، ابحث عن أكبر ملف
+        if os.path.isdir(file_path):
+            files = []
+            for root, dirs, filenames in os.walk(file_path):
+                for filename in filenames:
+                    file_full_path = os.path.join(root, filename)
+                    files.append((file_full_path, os.path.getsize(file_full_path)))
+            
+            if files:
+                largest_file = max(files, key=lambda x: x[1])
+                return largest_file[0]
+        
+        return file_path
+    
+    raise Exception("لم يتم العثور على الملف")
 
 # ==========================================
 # 5. 📥 محرك MEGA
 # ==========================================
 async def download_from_mega(url, status_msg):
-    """
-    📥 تحميل من MEGA
-    """
     try:
-        print(f"🌐 [MEGA] تحميل: {url[:60]}")
-        
         await status_msg.edit_text(
             f"📥 **جاري التحميل من MEGA...**\n\n"
             f"⏳ **الحالة:** جاري البدء..."
@@ -363,13 +374,11 @@ async def download_from_mega(url, status_msg):
             )
             return result.returncode, result.stdout, result.stderr
         
-        # تشغيل في executor
         returncode, stdout, stderr = await loop.run_in_executor(None, mega_sync)
         
         if returncode != 0:
             raise Exception(f"فشل MEGA: {stderr}")
         
-        # البحث عن الملف
         files = [f for f in os.listdir(DOWNLOAD_DIR) if f not in ['temp.torrent']]
         if files:
             latest_file = max(files, key=lambda x: os.path.getmtime(os.path.join(DOWNLOAD_DIR, x)))
@@ -387,24 +396,17 @@ async def download_from_mega(url, status_msg):
 # 6. محرك WorkUpload
 # ==========================================
 async def download_from_workupload(url, status_msg):
-    """
-    📥 تحميل من WorkUpload
-    """
     async with async_playwright() as p:
         browser = await p.firefox.launch(headless=True)
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
         
         try:
-            await status_msg.edit_text(
-                f"📥 **جاري فتح صفحة WorkUpload...**\n\n"
-                f"🌐 **الرابط:** `{url[:50]}...`"
-            )
+            await status_msg.edit_text("📥 **جاري فتح صفحة WorkUpload...**")
             
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             await asyncio.sleep(3)
             
-            # البحث عن رابط البدء
             links = await page.evaluate("""
                 () => {
                     const allLinks = [];
@@ -499,19 +501,13 @@ async def download_from_workupload(url, status_msg):
 # 7. محرك GoFile
 # ==========================================
 async def download_from_gofile(url, status_msg):
-    """
-    📥 تحميل من GoFile
-    """
     async with async_playwright() as p:
         browser = await p.firefox.launch(headless=True)
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
         
         try:
-            await status_msg.edit_text(
-                f"📥 **جاري فتح صفحة GoFile...**\n\n"
-                f"🌐 **الرابط:** `{url[:50]}...`"
-            )
+            await status_msg.edit_text("📥 **جاري فتح صفحة GoFile...**")
             
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             await asyncio.sleep(8)
@@ -577,9 +573,6 @@ async def download_from_gofile(url, status_msg):
 # 8. التحميل المباشر
 # ==========================================
 async def download_direct(url, status_msg):
-    """
-    📥 تحميل مباشر
-    """
     filename = url.split("/")[-1].split("?")[0] or "downloaded_file.bin"
     file_path = os.path.join(DOWNLOAD_DIR, filename)
     
@@ -604,14 +597,10 @@ async def download_direct(url, status_msg):
         if response.status_code != 200:
             raise Exception(f"HTTP {response.status_code}")
         
-        total = int(response.headers.get('Content-Length', 0))
-        downloaded = 0
-        
         with open(file_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=1024*1024):
                 if chunk:
                     f.write(chunk)
-                    downloaded += len(chunk)
         
         return file_path
     
@@ -621,13 +610,10 @@ async def download_direct(url, status_msg):
 # 9. الموجه الذكي
 # ==========================================
 async def smart_download(url, status_msg):
-    """
-    🧭 اختيار المحرك المناسب
-    """
     url_lower = url.lower()
     
     if url.startswith('magnet:') or url.endswith('.torrent'):
-        return await download_torrent_with_libtorrent(url, status_msg)
+        return await download_torrent_with_progress(url, status_msg)
     
     if 'mega.nz' in url_lower or 'mega.io' in url_lower:
         return await download_from_mega(url, status_msg)
@@ -641,110 +627,7 @@ async def smart_download(url, status_msg):
     return await download_direct(url, status_msg)
 
 # ==========================================
-# 10. الرفع إلى Buzzheavier
-# ==========================================
-BUZZ_UPLOAD_BASE = "https://w.buzzheavier.com"
-BUZZ_LINK_BASE = "https://buzzheavier.com"
-
-class _ProgressReader:
-    def __init__(self, path, callback=None):
-        self._f = open(path, "rb")
-        self.size = os.path.getsize(path)
-        self.sent = 0
-        self._cb = callback
-        self._last = 0.0
-
-    def __len__(self):
-        return self.size
-
-    def read(self, n=-1):
-        chunk = self._f.read(n)
-        if chunk:
-            self.sent += len(chunk)
-            if self._cb and (self.sent >= self.size or time.time() - self._last >= 3):
-                self._last = time.time()
-                try:
-                    self._cb(self.sent, self.size)
-                except Exception:
-                    pass
-        return chunk
-
-    def close(self):
-        try:
-            self._f.close()
-        except Exception:
-            pass
-
-def upload_to_buzzheavier(file_path, progress_callback=None):
-    name = os.path.basename(file_path)[:500]
-    endpoint = f"{BUZZ_UPLOAD_BASE}/{urllib.parse.quote(name, safe='')}"
-    
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept": "application/json, text/plain, */*",
-    })
-    
-    body = None
-    try:
-        body = _ProgressReader(file_path, progress_callback)
-        response = session.put(endpoint, data=body, timeout=(30, 900))
-        
-        if response.status_code in (200, 201):
-            try:
-                data = response.json()
-                if 'data' in data and 'id' in data['data']:
-                    return f"{BUZZ_LINK_BASE}/{data['data']['id']}"
-            except:
-                pass
-            
-            for m in re.finditer(r'buzzheavier\.com/(?:f/)?([A-Za-z0-9_-]{8,})', response.text or ""):
-                return f"{BUZZ_LINK_BASE}/{m.group(1)}"
-        
-        raise Exception(f"HTTP {response.status_code}")
-        
-    finally:
-        if body:
-            body.close()
-
-async def upload_to_buzz_with_progress(file_path, status_msg):
-    """
-    ⬆️ الرفع مع شريط تقدم
-    """
-    loop = asyncio.get_event_loop()
-    up_start = [time.time()]
-    
-    async def upload_progress(current, total):
-        now = time.time()
-        elapsed = now - up_start[0]
-        speed = current / elapsed if elapsed > 0 else 1
-        eta = round((total - current) / speed) if speed > 0 else 0
-        percentage = current * 100 / total
-        filled = int(20 * current // total)
-        bar = '█' * filled + '░' * (20 - filled)
-        
-        text = (
-            f"⬆️ **الرفع إلى Buzzheavier**\n\n"
-            f"[{bar}] {percentage:.1f}%\n"
-            f"📦 **تم رفع:** {humanbytes(current)} / {humanbytes(total)}\n"
-            f"🚀 **السرعة:** {humanbytes(speed)}/s\n"
-            f"⏱️ **المتبقي:** {eta}s"
-        )
-        
-        try:
-            await status_msg.edit_text(text)
-        except Exception:
-            pass
-    
-    def thread_progress(current, total):
-        asyncio.run_coroutine_threadsafe(upload_progress(current, total), loop)
-    
-    return await loop.run_in_executor(
-        None, lambda: upload_to_buzzheavier(file_path, thread_progress)
-    )
-
-# ==========================================
-# 11. واجهة البوت
+# 10. واجهة البوت
 # ==========================================
 MODES_INFO = {
     "link_to_file": "📥 رابط ⬅️ ملف",
@@ -803,7 +686,7 @@ async def mode_callback(client, callback: CallbackQuery):
     await callback.answer("تم الحفظ")
 
 # ==========================================
-# 12. معالج الروابط
+# 11. معالج الروابط
 # ==========================================
 @bot.on_message(filters.regex(r'https?://[^\s]+') & filters.private)
 async def handle_links(client, message: Message):
@@ -837,18 +720,32 @@ async def handle_links(client, message: Message):
                 f"📁 **الملف:** `{os.path.basename(file_path)}`\n"
                 f"📦 **الحجم:** `{humanbytes(local_size)}`\n"
                 f"🔍 **النوع:** {emoji} `{file_category}`\n\n"
-                f"🔗 **جاري الرفع إلى Buzzheavier...**"
+                f"📤 **جاري الإرسال...**"
             )
             
-            buzz_link = await upload_to_buzz_with_progress(file_path, status_msg)
+            # إرسال الملف مباشرة (بدون Buzzheavier)
+            if file_category == "video":
+                await message.reply_video(
+                    video=file_path,
+                    caption=f"🎬 `{os.path.basename(file_path)}`\n🔍 النوع: فيديو"
+                )
+            elif file_category == "audio":
+                await message.reply_audio(
+                    audio=file_path,
+                    caption=f"🎵 `{os.path.basename(file_path)}`\n🔍 النوع: صوت"
+                )
+            elif file_category == "image":
+                await message.reply_photo(
+                    photo=file_path,
+                    caption=f"🖼️ `{os.path.basename(file_path)}`\n🔍 النوع: صورة"
+                )
+            else:
+                await message.reply_document(
+                    document=file_path,
+                    caption=f"📄 `{os.path.basename(file_path)}`\n🔍 النوع: مستند"
+                )
             
-            await status_msg.edit_text(
-                f"✅ **تم التحويل بنجاح!**\n\n"
-                f"📁 **الملف:** `{os.path.basename(file_path)}`\n"
-                f"📦 **الحجم:** `{humanbytes(local_size)}`\n"
-                f"🔍 **النوع:** {emoji} `{file_category}`\n\n"
-                f"🔗 **الرابط:**\n{buzz_link}"
-            )
+            await status_msg.delete()
             return
         
         # وضع: رابط ⬅️ ملف
@@ -922,7 +819,7 @@ async def handle_links(client, message: Message):
             os.remove(file_path)
 
 # ==========================================
-# 13. معالج الملفات
+# 12. معالج الملفات
 # ==========================================
 @bot.on_message((filters.document | filters.video | filters.audio) & filters.private)
 async def handle_files(client, message: Message):
@@ -960,19 +857,31 @@ async def handle_files(client, message: Message):
     
     try:
         file_path = await message.download(progress=download_progress)
-        await status_msg.edit_text("🚀 جاري الرفع...")
         
-        buzz_link = await upload_to_buzz_with_progress(file_path, status_msg)
+        # إرسال الملف مرة أخرى (بدون رفع لـ Buzzheavier)
+        await status_msg.edit_text(
+            f"✅ **تم التحميل!**\n\n"
+            f"📁 **الملف:** `{os.path.basename(file_path)}`\n"
+            f"📦 **الحجم:** `{humanbytes(os.path.getsize(file_path))}`"
+        )
         
         file_category, emoji = get_file_category(file_path)
         
-        await status_msg.edit_text(
-            f"✅ **تم التحويل!**\n\n"
-            f"📁 **الملف:** `{os.path.basename(file_path)}`\n"
-            f"📦 **الحجم:** `{humanbytes(os.path.getsize(file_path))}`\n"
-            f"🔍 **النوع:** {emoji} `{file_category}`\n\n"
-            f"🔗 **الرابط:**\n{buzz_link}"
-        )
+        if file_category == "video":
+            await message.reply_video(
+                video=file_path,
+                caption=f"🎬 `{os.path.basename(file_path)}`\n🔍 النوع: فيديو"
+            )
+        elif file_category == "audio":
+            await message.reply_audio(
+                audio=file_path,
+                caption=f"🎵 `{os.path.basename(file_path)}`\n🔍 النوع: صوت"
+            )
+        else:
+            await message.reply_document(
+                document=file_path,
+                caption=f"📄 `{os.path.basename(file_path)}`"
+            )
         
     except Exception as e:
         await status_msg.edit_text(f"❌ خطأ:\n`{str(e)}`")
@@ -981,14 +890,14 @@ async def handle_files(client, message: Message):
             os.remove(file_path)
 
 # ==========================================
-# 14. تشغيل البوت
+# 13. تشغيل البوت
 # ==========================================
 async def start_bot():
     try:
         await bot.start()
         print("🟢 البوت يعمل!")
         print("✅ المصادر: WorkUpload | GoFile | MEGA | تورنت | مباشر")
-        print("🎯 محرك التورنت: يستخدم libtorrent مباشرة")
+        print("🎯 محرك التورنت: يستخدم الكود الأصلي في thread منفصل")
         await idle()
     except Exception as e:
         print(f"⚠️ خطأ: {e}")
