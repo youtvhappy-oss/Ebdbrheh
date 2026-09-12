@@ -1,34 +1,59 @@
 # -*- coding: utf-8 -*-
-# 🚀 البوت الشامل - نسخة مصححة
-# ==========================================
+"""
+🚀 البوت الشامل - MEGA + كشف نوع الملف تلقائياً
+"""
 
+# ==========================================
 # 1. تثبيت المكتبات
+# ==========================================
 import subprocess
 import sys
 
-print("📦 تثبيت المكتبات...")
+def install_packages():
+    """تثبيت جميع المكتبات المطلوبة"""
+    packages = [
+        'pyrogram', 
+        'tgcrypto', 
+        'nest_asyncio', 
+        'requests', 
+        'playwright', 
+        'libtorrent',
+        'python-magic'  # 🆕 لكشف نوع الملف
+    ]
+    
+    print("📦 تثبيت المكتبات...")
+    
+    for package in packages:
+        try:
+            __import__(package)
+            print(f"✅ {package} مثبت")
+        except ImportError:
+            print(f"📥 تثبيت {package}...")
+            subprocess.check_call([
+                sys.executable, '-m', 'pip', 'install', 
+                package, '-q'
+            ])
+    
+    # تثبيت Firefox
+    print("🦊 تثبيت Firefox...")
+    subprocess.run(['playwright', 'install', 'firefox'], check=True)
+    subprocess.run(['playwright', 'install-deps', 'firefox'], check=True)
+    
+    # تثبيت megatools لـ MEGA
+    print("download تثبيت megatools لـ MEGA...")
+    subprocess.run(['apt-get', 'update', '-qq'], capture_output=True)
+    subprocess.run(['apt-get', 'install', '-y', '-qq', 'megatools'], capture_output=True)
+    
+    # تثبيت aria2
+    subprocess.run(['apt-get', 'install', '-y', '-qq', 'aria2'], capture_output=True)
+    
+    print("✅ تم تثبيت جميع المكتبات")
 
-packages = ['pyrogram', 'tgcrypto', 'nest_asyncio', 'requests', 'playwright', 'libtorrent']
+install_packages()
 
-for package in packages:
-    try:
-        __import__(package)
-        print(f"✅ {package} مثبت")
-    except ImportError:
-        print(f"📥 تثبيت {package}...")
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', package, '-q'])
-
-print("🦊 تثبيت Firefox...")
-subprocess.run(['playwright', 'install', 'firefox'], check=True)
-subprocess.run(['playwright', 'install-deps', 'firefox'], check=True)
-
-print("⚙️ تثبيت aria2...")
-subprocess.run(['apt-get', 'update', '-qq'], capture_output=True)
-subprocess.run(['apt-get', 'install', '-y', '-qq', 'aria2'], capture_output=True)
-
-print("✅ تم تثبيت جميع المكتبات")
-
+# ==========================================
 # 2. الاستيرادات
+# ==========================================
 import nest_asyncio
 nest_asyncio.apply()
 
@@ -39,6 +64,8 @@ import asyncio
 import re
 import urllib.parse
 import gc
+import mimetypes
+import magic  # 🆕 لكشف نوع الملف
 import requests
 from google.colab import userdata
 from pyrogram import Client, filters, idle
@@ -49,7 +76,9 @@ import libtorrent as lt
 gc.collect()
 print("✅ جميع المكتبات جاهزة")
 
+# ==========================================
 # 3. الإعدادات
+# ==========================================
 API_ID = int(userdata.get('API_ID').strip())
 API_HASH = userdata.get('API_HASH').strip()
 BOT_TOKEN = userdata.get('BOT_TOKEN').strip()
@@ -89,7 +118,124 @@ async def keep_alive_ping():
                 pass
 
 # ==========================================
-# 4. محرك WorkUpload
+# 4. 🔍 كشف نوع الملف تلقائياً (جديد!)
+# ==========================================
+def detect_file_type(file_path):
+    """
+    🔍 كشف نوع الملف باستخدام python-magic
+    """
+    try:
+        # قراءة أول 1024 bytes من الملف
+        with open(file_path, 'rb') as f:
+            header = f.read(1024)
+        
+        # استخدام python-magic لكشف النوع
+        mime = magic.from_buffer(header, mime=True)
+        
+        # استخدام mimetypes كـ backup
+        if not mime:
+            mime, _ = mimetypes.guess_type(file_path)
+        
+        if not mime:
+            mime = "application/octet-stream"
+        
+        return mime
+        
+    except Exception as e:
+        print(f"⚠️ خطأ في كشف نوع الملف: {e}")
+        return "application/octet-stream"
+
+def get_file_category(file_path):
+    """
+    📂 تحديد فئة الملف (فيديو/صوت/مستند/صورة)
+    """
+    mime_type = detect_file_type(file_path)
+    
+    # فيديو
+    if mime_type.startswith('video/'):
+        return "video"
+    # صوت
+    elif mime_type.startswith('audio/'):
+        return "audio"
+    # صورة
+    elif mime_type.startswith('image/'):
+        return "image"
+    # مستند
+    else:
+        return "document"
+
+def get_mime_type(file_path):
+    """
+    🎯 الحصول على MIME type للملف
+    """
+    return detect_file_type(file_path)
+
+# ==========================================
+# 5. 🎯 محرك تحميل MEGA
+# ==========================================
+async def download_from_mega(url, status_msg):
+    """
+    📥 تحميل من MEGA باستخدام megatools
+    """
+    try:
+        print(f"🌐 [MEGA] تحميل من: {url}")
+        
+        # التحقق من صحة رابط MEGA
+        if 'mega.nz' not in url and 'mega.io' not in url:
+            raise Exception("رابط MEGA غير صالح")
+        
+        # استخدام megatools للتحميل
+        await status_msg.edit_text("📥 جاري التحميل من MEGA...")
+        
+        # إنشاء أمر megatools
+        cmd = [
+            'megadl',
+            '--path', DOWNLOAD_DIR + os.sep,
+            url
+        ]
+        
+        # تشغيل الأمر
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT
+        )
+        
+        # قراءة المخرجات
+        output = []
+        async for line in process.stdout:
+            line = line.decode().strip()
+            if line:
+                output.append(line)
+                print(f"   📥 {line}")
+        
+        # انتظار الانتهاء
+        await process.wait()
+        
+        if process.returncode != 0:
+            raise Exception(f"فشل megatools: {output}")
+        
+        # البحث عن الملف المحمل
+        files = [f for f in os.listdir(DOWNLOAD_DIR) if f not in ['temp.torrent']]
+        
+        if not files:
+            raise Exception("لم يتم تحميل أي ملف")
+        
+        # اختيار أحدث ملف
+        file_path = os.path.join(DOWNLOAD_DIR, sorted(files, key=lambda x: os.path.getmtime(os.path.join(DOWNLOAD_DIR, x)))[-1])
+        
+        # التحقق من الملف
+        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+            print(f"✅ [MEGA] تم تحميل: {file_path}")
+            return file_path
+        else:
+            raise Exception("الملف فارغ أو غير موجود")
+            
+    except Exception as e:
+        raise Exception(f"فشل تحميل MEGA: {str(e)}")
+
+# ==========================================
+# 6. محرك WorkUpload
 # ==========================================
 async def download_from_workupload(url, status_msg):
     try:
@@ -176,13 +322,7 @@ async def download_from_workupload(url, status_msg):
                 await browser.close()
                 
                 if download_file_path and os.path.exists(download_file_path):
-                    file_size = os.path.getsize(download_file_path)
-                    
-                    if file_size > 1000:
-                        return download_file_path
-                    else:
-                        os.remove(download_file_path)
-                        raise Exception(f"الملف صغير جداً: {file_size} bytes")
+                    return download_file_path
                 else:
                     raise Exception("لم يتم تحميل الملف")
                     
@@ -194,7 +334,7 @@ async def download_from_workupload(url, status_msg):
         raise Exception(f"خطأ في WorkUpload: {str(e)}")
 
 # ==========================================
-# 5. محرك GoFile
+# 7. محرك GoFile
 # ==========================================
 async def download_from_gofile(url, status_msg):
     try:
@@ -266,7 +406,7 @@ async def download_from_gofile(url, status_msg):
         raise Exception(f"خطأ في GoFile: {str(e)}")
 
 # ==========================================
-# 6. محرك التورنت
+# 8. محرك التورنت
 # ==========================================
 async def download_from_torrent(url, status_msg):
     try:
@@ -356,7 +496,7 @@ async def download_from_torrent(url, status_msg):
         raise Exception(f"فشل التورنت: {str(e)}")
 
 # ==========================================
-# 7. التحميل المباشر
+# 9. التحميل المباشر
 # ==========================================
 async def download_direct(url, status_msg):
     filename = url.split("/")[-1].split("?")[0] or "downloaded_file.bin"
@@ -422,28 +562,40 @@ async def download_direct(url, status_msg):
     return file_path
 
 # ==========================================
-# 8. الموجه الذكي
+# 10. الموجه الذكي (محدث)
 # ==========================================
 async def smart_download(url, status_msg):
+    """
+    🧭 اختيار المحرك المناسب
+    """
     url_lower = url.lower()
     
+    # تورنت
     if url.startswith('magnet:') or url.endswith('.torrent'):
         await status_msg.edit_text("🎯 جاري التحميل من التورنت...")
         return await download_from_torrent(url, status_msg)
     
+    # MEGA (جديد!)
+    if 'mega.nz' in url_lower or 'mega.io' in url_lower:
+        await status_msg.edit_text("📥 جاري التحميل من MEGA...")
+        return await download_from_mega(url, status_msg)
+    
+    # WorkUpload
     if 'workupload.com' in url_lower:
         await status_msg.edit_text("📥 جاري التحميل من WorkUpload...")
         return await download_from_workupload(url, status_msg)
     
+    # GoFile
     if 'gofile.io' in url_lower:
         await status_msg.edit_text("📥 جاري التحميل من GoFile...")
         return await download_from_gofile(url, status_msg)
     
+    # تحميل مباشر
     await status_msg.edit_text("⬇️ جاري التحميل المباشر...")
     return await download_direct(url, status_msg)
 
 # ==========================================
-# 9. الرفع إلى Buzzheavier
+# 11. الرفع إلى Buzzheavier
 # ==========================================
 BUZZ_UPLOAD_BASE = "https://w.buzzheavier.com"
 BUZZ_LINK_BASE = "https://buzzheavier.com"
@@ -543,13 +695,14 @@ async def upload_to_buzz_with_progress(file_path, status_msg):
     )
 
 # ==========================================
-# 10. واجهة البوت
+# 12. واجهة البوت
 # ==========================================
 MODES_INFO = {
     "link_to_file": "📥 رابط ⬅️ ملف",
     "file_to_link": "📤 ملف ⬅️ رابط",
     "link_to_link": "🔄 رابط ⬅️ رابط",
     "torrent_mode": "🎯 تورنت ⬅️ ملف/رابط",
+    "mega_mode": "📥 MEGA ⬅️ ملف",  # 🆕 وضع MEGA
 }
 
 def get_main_keyboard(current_mode):
@@ -572,9 +725,11 @@ async def start_handler(client, message: Message):
         "📥 **رابط ⬅️ ملف:** أرسل رابطاً واستلم الملف\n"
         "📤 **ملف ⬅️ رابط:** أرسل ملفاً واستلم رابط\n"
         "🔄 **رابط ⬅️ رابط:** أرسل رابطاً واستلم رابط\n"
-        "🎯 **تورنت ⬅️ ملف/رابط:** أرسل رابط مغناطيسي\n\n"
+        "🎯 **تورنت ⬅️ ملف/رابط:** أرسل رابط مغناطيسي\n"
+        "📥 **MEGA ⬅️ ملف:** أرسل رابط MEGA\n\n"
         "المصادر:\n"
-        "✅ WorkUpload | GoFile | تورنت | مباشر",
+        "✅ WorkUpload | GoFile | MEGA | تورنت | مباشر\n\n"
+        "🎯 **كشف نوع الملف تلقائياً:** فيديو/صوت/مستند",
         reply_markup=get_main_keyboard(user_modes[message.chat.id])
     )
 
@@ -588,6 +743,7 @@ async def mode_callback(client, callback: CallbackQuery):
         "file_to_link": "📤 **ملف ⬅️ رابط**",
         "link_to_link": "🔄 **رابط ⬅️ رابط**",
         "torrent_mode": "🎯 **تورنت ⬅️ ملف/رابط**",
+        "mega_mode": "📥 **MEGA ⬅️ ملف**",
     }
     
     await callback.message.edit_text(
@@ -597,7 +753,7 @@ async def mode_callback(client, callback: CallbackQuery):
     await callback.answer("تم الحفظ")
 
 # ==========================================
-# 11. معالج الروابط
+# 13. معالج الروابط (محدث لكشف نوع الملف)
 # ==========================================
 @bot.on_message(filters.regex(r'https?://[^\s]+') & filters.private)
 async def handle_links(client, message: Message):
@@ -613,6 +769,7 @@ async def handle_links(client, message: Message):
     last_update = [0]
     
     try:
+        # التحميل
         file_path = await smart_download(url, status_msg)
         
         if not file_path or not os.path.exists(file_path):
@@ -620,7 +777,8 @@ async def handle_links(client, message: Message):
         
         local_size = os.path.getsize(file_path)
         
-        if mode in ("link_to_link", "torrent_mode"):
+        # وضع: رابط ⬅️ رابط
+        if mode in ("link_to_link", "torrent_mode", "mega_mode"):
             await status_msg.edit_text(
                 f"🚀 تم التحميل ({humanbytes(local_size)})!\nجاري الرفع..."
             )
@@ -629,15 +787,21 @@ async def handle_links(client, message: Message):
             await status_msg.edit_text(
                 f"✅ **تم التحويل!**\n\n"
                 f"📁 **الملف:** `{os.path.basename(file_path)}`\n"
-                f"📦 **الحجم:** `{humanbytes(local_size)}`\n\n"
+                f"📦 **الحجم:** `{humanbytes(local_size)}`\n"
+                f"🔍 **النوع:** `{get_mime_type(file_path)}`\n\n"  # 🆕 عرض نوع الملف
                 f"🔗 **الرابط:**\n{buzz_link}"
             )
             return
         
+        # وضع: رابط ⬅️ ملف
         if local_size > MAX_FILE_SIZE:
             raise Exception(f"الملف كبير جداً ({humanbytes(local_size)})")
         
         await status_msg.edit_text("🚀 جاري الإرسال...")
+        
+        # 🆕 كشف نوع الملف تلقائياً
+        file_category = get_file_category(file_path)
+        mime_type = get_mime_type(file_path)
         
         start_time = time.time()
         
@@ -652,6 +816,7 @@ async def handle_links(client, message: Message):
                 bar = '█' * filled + '░' * (20 - filled)
                 text = (
                     f"⬆️ **الرفع إلى تليجرام**\n\n"
+                    f"📁 **النوع:** {file_category}\n"  # 🆕 عرض نوع الملف
                     f"[{bar}] {percentage:.1f}%\n"
                     f"📦 **تم رفع:** {humanbytes(current)} / {humanbytes(total)}\n"
                     f"🚀 **السرعة:** {humanbytes(speed)}/s\n"
@@ -662,18 +827,32 @@ async def handle_links(client, message: Message):
                 except Exception:
                     pass
         
-        if file_path.lower().endswith(('.mp4', '.mkv', '.avi', '.mov')):
+        # 🆕 إرسال الملف بناءً على نوعه المكتشف
+        if file_category == "video":
             await message.reply_video(
                 video=file_path,
-                caption=f"🎬 `{os.path.basename(file_path)}`",
+                caption=f"🎬 `{os.path.basename(file_path)}`\n🔍 النوع: فيديو",
+                progress=upload_progress
+            )
+        elif file_category == "audio":
+            await message.reply_audio(
+                audio=file_path,
+                caption=f"🎵 `{os.path.basename(file_path)}`\n🔍 النوع: صوت",
+                progress=upload_progress
+            )
+        elif file_category == "image":
+            await message.reply_photo(
+                photo=file_path,
+                caption=f"🖼️ `{os.path.basename(file_path)}`\n🔍 النوع: صورة",
                 progress=upload_progress
             )
         else:
             await message.reply_document(
                 document=file_path,
-                caption=f"📦 `{os.path.basename(file_path)}`",
+                caption=f"📄 `{os.path.basename(file_path)}`\n🔍 النوع: مستند",
                 progress=upload_progress
             )
+        
         await status_msg.delete()
         
     except Exception as e:
@@ -683,7 +862,7 @@ async def handle_links(client, message: Message):
             os.remove(file_path)
 
 # ==========================================
-# 12. معالج الملفات
+# 14. معالج الملفات
 # ==========================================
 @bot.on_message((filters.document | filters.video | filters.audio) & filters.private)
 async def handle_files(client, message: Message):
@@ -725,10 +904,15 @@ async def handle_files(client, message: Message):
         
         buzz_link = await upload_to_buzz_with_progress(file_path, status_msg)
         
+        # 🆕 كشف نوع الملف
+        file_category = get_file_category(file_path)
+        mime_type = get_mime_type(file_path)
+        
         await status_msg.edit_text(
             f"✅ **تم التحويل!**\n\n"
             f"📁 **الملف:** `{os.path.basename(file_path)}`\n"
-            f"📦 **الحجم:** `{humanbytes(os.path.getsize(file_path))}`\n\n"
+            f"📦 **الحجم:** `{humanbytes(os.path.getsize(file_path))}`\n"
+            f"🔍 **النوع:** `{file_category}`\n\n"
             f"🔗 **الرابط:**\n{buzz_link}"
         )
         
@@ -739,18 +923,20 @@ async def handle_files(client, message: Message):
             os.remove(file_path)
 
 # ==========================================
-# 13. تشغيل البوت
+# 15. تشغيل البوت
 # ==========================================
 async def start_bot():
     try:
         await bot.start()
         print("🟢 البوت يعمل!")
-        print("✅ المصادر: WorkUpload | GoFile | تورنت | مباشر")
+        print("✅ المصادر: WorkUpload | GoFile | MEGA | تورنت | مباشر")
+        print("🔍 كشف نوع الملف: ✅")
         await idle()
     except Exception as e:
         print(f"⚠️ خطأ: {e}")
     finally:
         await bot.stop()
 
-loop = asyncio.get_event_loop()
-loop.run_until_complete(start_bot())
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(start_bot())
