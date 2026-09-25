@@ -1,9 +1,8 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 ════════════════════════════════════════════════════════════════════
-              SILMA F5-TTS Auto Dubber — الإصدار 2.0
+              SILMA F5-TTS Auto Dubber — الإصدار 2.2
      (مزامنة كاملة + تسريع يحفظ النغمة + حد صلب + تقرير CSV)
 ════════════════════════════════════════════════════════════════════
 
@@ -11,20 +10,15 @@
   ملف ترجمة SRT/VTT عربي → نموذج SILMA F5-TTS → مسار صوتي متزامن
   بالكامل مع توقيتات الملف، بمدة تساوي مدة الفيديو الأصلي.
 
-خوارزمية المزامنة لكل سطر:
-  الميزانية = مدة السطر + استعارة من فجوة الصمت التالية (بحدود)
-  1) توليد بسرعة مقدّرة من المعايرة
-  2) لو تجاوز → إعادة توليد بسرعة أعلى (جودة أفضل من المعالجة)
-  3) لو ما زال يتجاوز → تسريع atempo يحفظ النغمة
-  4) كحل أخير → بتر عند حد الميزانية (لا تداخل مع التالي أبدًا)
-
 التشغيل:
-  python silma_dubber.py --file movie.srt
-  python silma_dubber.py --file movie.srt --limit 20 --mp3
-  python silma_dubber.py --file movie.srt --ref-audio voice.wav --ref-text "النص المطابق للعينة"
+  المسار تحدده أنت. عدد الأسطر تحدده أنت. بدون خيارات = الملف كاملًا.
 
-في كولاب: استخدم خلية المشغّل (تنزّل هذا الملف من GitHub وتشغّله).
-يفضَّل تفعيل GPU:  Runtime ← Change runtime type ← T4 GPU
+  python silma_dubber.py --file /المسار/الكامل/movie.srt
+  python silma_dubber.py --file movie.srt --limit 20
+  python silma_dubber.py --file movie.srt --skip 50
+  python silma_dubber.py --file movie.srt --ref-audio voice.wav --ref-text "النص"
+
+في كولاب: يفضَّل تفعيل GPU:  Runtime ← Change runtime type ← T4 GPU
 """
 
 from __future__ import annotations
@@ -53,8 +47,7 @@ CPS_INITIAL = 11.0           # تقدير أولي: حروف نطق/ثانية �
 
 @dataclass
 class Config:
-    """سياسة المزامنة — كل قيمة قابلة للضبط من سطر الأوامر،
-    وهي مادة تجارب ممتازة للتقرير النهائي."""
+    """سياسة المزامنة — كل قيمة قابلة للضبط من سطر الأوامر."""
     borrow_ratio: float = 0.60   # نسبة استعارة فجوة الصمت التالية
     borrow_max:    float = 0.50  # سقف الاستعارة (500ms)
     min_gap:       float = 0.12  # أقل صمت مضمون قبل السطر التالي
@@ -73,13 +66,13 @@ class Segment:
     start_ms: int
     end_ms: int
     text: str
-    budget_sec: float = 0.0   # الزمن المتاح الفعلي
-    raw_sec:     float = 0.0   # مدة الصوت قبل أي ضبط
-    final_sec:   float = 0.0   # مدة الصوت النهائية
-    gen_speed:   float = 1.0   # سرعة التوليد المستخدمة
-    dsp_factor:  float = 1.0   # معامل التسريع الرقمي
-    parts:       int   = 1     # عدد أجزاء التوليد
-    outcome:     str  = ""     # ok / fast / cut / fail
+    budget_sec: float = 0.0
+    raw_sec:     float = 0.0
+    final_sec:   float = 0.0
+    gen_speed:   float = 1.0
+    dsp_factor:  float = 1.0
+    parts:       int   = 1
+    outcome:     str  = ""
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -96,7 +89,6 @@ def bootstrap(ffmpeg_path: str | None) -> str:
 
     ff = ffmpeg_path or shutil.which("ffmpeg")
     if not ff and shutil.which("apt-get"):
-        # كولاب / لينكس: تثبيت عبر apt
         subprocess.run(["apt-get", "update", "-qq"], capture_output=True)
         subprocess.run(["apt-get", "install", "-y", "-qq", "ffmpeg"],
                        capture_output=True)
@@ -257,13 +249,11 @@ def trim_silence(seg, threshold_db: int = -42, pad_ms: int = 40):
 
 
 def stretch(clip, factor: float, ffmpeg_bin: str, workdir: Path):
-    """تسريع/تباطؤ مع الحفاظ على النغمة عبر ffmpeg atempo.
-    (البديل الخاطئ: pydub speedup — يرفع طبقة الصوت ويشوّهه)"""
+    """تسريع/تباطؤ مع الحفاظ على النغمة عبر ffmpeg atempo."""
     from pydub import AudioSegment
     if factor <= 1.02 or len(clip) < 500:
         return clip
     factor = max(0.5, min(factor, 4.0))
-    # atempo يعمل حتى ×2 لكل طبقة — نبني سلسلة إن لزم
     chain, f = [], factor
     while f > 2.0:
         chain.append("atempo=2.0")
@@ -328,7 +318,6 @@ class SilmaEngine:
         self.seed, self.nfe = seed, nfe
 
         if ref_audio and ref_text:
-            # وضع الاستنساخ الصوتي: صوتك أنت
             self.ref_audio = str(Path(ref_audio).resolve())
             self.ref_text = ref_text
             print(f"🎙 صوت مرجعي مخصص: {self.ref_audio}")
@@ -350,8 +339,7 @@ class SilmaEngine:
         return h.hexdigest()[:20]
 
     def generate(self, text: str, speed: float, out_wav: Path):
-        """يولّد نصًا واحدًا → AudioSegment موحّد (24kHz أحادي).
-        إن وُجد في التخزين المؤقت يُحمَّل فورًا دون توليد."""
+        """يولّد نصًا واحدًا → AudioSegment موحّد (24kHz أحادي)."""
         from pydub import AudioSegment
 
         cached_path = self.cache / f"{self._key(text, speed)}.wav" if self.cache else None
@@ -390,9 +378,9 @@ class SyncEngine:
         self.cfg = cfg
         self.ffmpeg = ffmpeg_bin
         self.workdir = workdir
-        self.cps = CPS_INITIAL       # معايرة تكيّفية — تتحسن أثناء العمل
-        self.regens = 0              # عدد مرات إعادة التوليد
-        self._n = itertools.count()  # مولّد أسماء ملفات مؤقتة
+        self.cps = CPS_INITIAL
+        self.regens = 0
+        self._n = itertools.count()
 
     # ── الزمن المتاح ──────────────────────────────────────────
     def budget(self, segs: list[Segment], i: int) -> float:
@@ -423,7 +411,6 @@ class SyncEngine:
             seg = trim_silence(seg)
             d = len(seg) / 1000.0
             raw += d
-            # المعايرة التكيّفية (EMA) — كل قياس يصحّح تقديرات الأسطر القادمة
             ch = speech_chars(p)
             if ch >= 8 and d > 0.3:
                 measured = ch / max(0.05, d - 0.05)
@@ -447,7 +434,7 @@ class SyncEngine:
         budget = self.budget(segs, i)
         seg.budget_sec = budget
         chars = speech_chars(seg.text)
-        est = chars / self.cps   # التقدير المسبق بالمعايرة الحالية
+        est = chars / self.cps
 
         # 1) التقسيم المسبق للجمل الطويلة
         k = max(1, math.ceil(est / (budget * 0.95)))
@@ -538,7 +525,7 @@ def write_report(csv_path: Path, segs: list[Segment], meta: dict):
         f"مرات إعادة التوليد      : {meta['regens']}",
         f"زمن المعالجة            : {meta['elapsed']:.0f} ث "
         f"(عامل السرعة ×{meta['rtf']:.1f})",
-        f"الإعدادات               : borrow={meta['cfg']}",
+        f"الإعدادات               : {meta['cfg']}",
         "",
     ]
     txt = csv_path.with_suffix(".summary.txt")
@@ -550,7 +537,7 @@ def write_report(csv_path: Path, segs: list[Segment], meta: dict):
 
 
 # ══════════════════════════════════════════════════════════════════
-# القسم 9 — Google Drive + البحث عن الملف
+# القسم 9 — Google Drive (للوصول للملفات فقط)
 # ══════════════════════════════════════════════════════════════════
 
 def mount_drive():
@@ -563,40 +550,25 @@ def mount_drive():
         return None
 
 
-def find_subtitle(name: str, roots: list) -> Path | None:
-    """إن كان المسار صحيحًا يستخدمه مباشرة، وإلا يبحث تطابقيًا (غير حساس للحالة)."""
-    if os.path.isfile(name):
-        return Path(name)
-    target = name.strip().lower()
-    for root in roots:
-        if not root or not os.path.isdir(root):
-            continue
-        print(f"🔎 البحث عن '{name}' في: {root}")
-        for dirpath, _, filenames in os.walk(root):
-            for f in filenames:
-                if f.lower() == target:
-                    return Path(dirpath) / f
-    return None
-
-
 # ══════════════════════════════════════════════════════════════════
 # القسم 10 — المسار الرئيسي
 # ══════════════════════════════════════════════════════════════════
 
 def main():
     ap = argparse.ArgumentParser(
-        description="SILMA F5-TTS Auto Dubber v2 — دبلجة عربية متزامنة من ملف ترجمة")
+        description="SILMA F5-TTS Auto Dubber v2.2 — دبلجة عربية متزامنة من ملف ترجمة")
     ap.add_argument("--file", "-f", required=True,
-                    help="اسم ملف الترجمة في Google Drive (أو مساره الكامل)")
+                    help="المسار الكامل لملف الترجمة")
     ap.add_argument("--out-dir", help="مجلد الإخراج (افتراضي: بجانب ملف الترجمة)")
     ap.add_argument("--ref-audio", help="عينة صوتية للاستنساخ الصوتي (wav)")
     ap.add_argument("--ref-text", help="النص المطابق حرفيًا للعينة الصوتية")
     ap.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--nfe", type=int, default=16,
-                    help="خطوات الـ diffusion (أعلى = جودة أفضل وأبطأ)")
+    ap.add_argument("--nfe", type=int, default=16)
     ap.add_argument("--limit", type=int, default=0,
-                    help="معالجة أول N سطر فقط (للتجربة — ابدأ بـ 20 دائمًا)")
+                    help="معالجة أول N سطر فقط (بدونه: الملف كاملًا)")
+    ap.add_argument("--skip", type=int, default=0,
+                    help="تخطي أول N سطر (بدونه: البدء من أول سطر)")
     ap.add_argument("--max-rate", type=float, default=1.55)
     ap.add_argument("--borrow-ratio", type=float, default=0.60)
     ap.add_argument("--borrow-max", type=float, default=0.50)
@@ -613,35 +585,39 @@ def main():
     ffmpeg_bin = bootstrap(args.ffmpeg)
 
     # [2/6] Drive
-    drive_root = None
     if not args.no_drive:
         print("\n⏳ [2/6] ربط Google Drive...")
         drive_root = mount_drive()
         print("✅ Drive جاهز." if drive_root else "ℹ تشغيل محلي بدون Drive.")
 
-    # [3/6] إيجاد الملف وقراءته
-    print(f"\n⏳ [3/6] البحث عن ملف الترجمة '{args.file}'...")
-    srt_path = find_subtitle(args.file, [drive_root, os.getcwd()])
-    if not srt_path:
-        sys.exit(f"❌ لم يُعثر على '{args.file}' — ارفعه إلى Google Drive "
-                 f"أو مرّر مساره الكامل.")
-    print(f"✅ تم العثور على الملف:\n   ➜ {srt_path}")
+    # [3/6] ملف الترجمة — من المسار الذي تحدده أنت
+    print("\n⏳ [3/6] قراءة ملف الترجمة...")
+    srt_path = Path(args.file).expanduser()
+    if not srt_path.is_file():
+        sys.exit(f"❌ الملف غير موجود: {srt_path}")
+    print(f"✅ الملف: {srt_path}")
 
     segs = parse_subtitles(srt_path)
     if not segs:
         sys.exit("❌ الملف لا يحتوي أسطر ترجمة صالحة.")
+    total_parsed = len(segs)
+
+    # التحديد بيدك وحدك — الافتراضي: الملف كاملًا
+    if args.skip > 0:
+        segs = segs[min(args.skip, len(segs)):]
     if args.limit > 0:
         segs = segs[:args.limit]
-        print(f"✅ وضع التجربة: أول {len(segs)} سطرًا فقط.")
-    print(f"✅ عدد الأسطر: {len(segs)} — "
-          f"مدة الفيديو حسب الترجمة: {max(s.end_ms for s in segs)/1000:.1f} ثانية")
+    if not segs:
+        sys.exit("❌ لا توجد أسطر ضمن النطاق المحدد.")
+    print(f"✅ سيتم معالجة {len(segs)} من {total_parsed} سطرًا — "
+          f"آخر توقيت: {max(s.end_ms for s in segs)/1000:.1f} ثانية")
 
     # [4/6] النموذج
     print("\n⏳ [4/6] تحميل نموذج SILMA F5-TTS...")
     cache_dir = args.cache_dir or (srt_path.parent / ".silma_cache")
     engine = SilmaEngine(device=args.device, seed=args.seed, nfe=args.nfe,
-                          ref_audio=args.ref_audio, ref_text=args.ref_text,
-                          cache_dir=cache_dir, use_cache=not args.no_cache)
+                         ref_audio=args.ref_audio, ref_text=args.ref_text,
+                         cache_dir=cache_dir, use_cache=not args.no_cache)
 
     # [5/6] التوليد والمزامنة
     print(f"\n⏳ [5/6] بدء التوليد والمزامنة ({len(segs)} سطرًا)...")
@@ -683,7 +659,7 @@ def main():
     print("\n⏳ [6/6] التجميع والتصدير...")
     peak = float(np.abs(master).max()) if master.size else 0.0
     if peak > 0.95:
-        master *= 0.95 / peak          # تطبيع الذروة (حماية من القطع)
+        master *= 0.95 / peak
     pcm = np.clip(master * 32767.0, -32768, 32767).astype(np.int16)
     final = AudioSegment(pcm.tobytes(), sample_width=2,
                          frame_rate=SAMPLE_RATE, channels=1)
@@ -714,14 +690,13 @@ def main():
     print(f"\n🎉 اكتملت الدبلجة في {elapsed:.0f} ثانية "
           f"(أسرع من الزمن الحقيقي ×{(total_ms/1000)/max(elapsed,0.1):.1f})")
 
-    # معاينة داخل كولاب إن أمكن
+    # معاينة داخل كولاب (المخرج الكامل محفوظ أعلاه)
     try:
         from IPython.display import Audio, display
-        print("\n🎧 معاينة (أول دقيقة):")
-        preview = final[:60000]
         ppath = workdir / "preview.wav"
-        preview.export(ppath, format="wav")
-        display(Audio(str(ppath)))
+        final[:60000].export(ppath, format="wav")
+        print("\n🎧 معاينة سريعة (المخرج الكامل محفوظ أعلاه):")
+        display(Audio(filename=str(ppath)))
     except Exception:
         pass
 
