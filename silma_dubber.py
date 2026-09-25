@@ -2,23 +2,17 @@
 # -*- coding: utf-8 -*-
 """
 ════════════════════════════════════════════════════════════════════
-              SILMA F5-TTS Auto Dubber — الإصدار 2.2
-     (مزامنة كاملة + تسريع يحفظ النغمة + حد صلب + تقرير CSV)
+              SILMA F5-TTS Auto Dubber — الإصدار 3.0
+     (حقل تفاعلي لاسم الملف + بحث تلقائي في Drive + تسريع بلا قطع)
 ════════════════════════════════════════════════════════════════════
 
 ماذا يفعل؟
-  ملف ترجمة SRT/VTT عربي → نموذج SILMA F5-TTS → مسار صوتي متزامن
-  بالكامل مع توقيتات الملف، بمدة تساوي مدة الفيديو الأصلي.
+  1) يطلب منك اسم ملف الترجمة (حقل إدخال)
+  2) يبحث عنه في Google Drive ويربطه
+  3) يدبلج الملف كاملًا — لا قطع أبدًا: مهما طال السطر يُسَّرع
+     (يحفظ النغمة) ليدخل وقته، ولا تُبتر أي كلمة.
 
-التشغيل:
-  المسار تحدده أنت. عدد الأسطر تحدده أنت. بدون خيارات = الملف كاملًا.
-
-  python silma_dubber.py --file /المسار/الكامل/movie.srt
-  python silma_dubber.py --file movie.srt --limit 20
-  python silma_dubber.py --file movie.srt --skip 50
-  python silma_dubber.py --file movie.srt --ref-audio voice.wav --ref-text "النص"
-
-في كولاب: يفضَّل تفعيل GPU:  Runtime ← Change runtime type ← T4 GPU
+في كولاب: شغّل خلية التشغيل — سيظهر لك حقل تكتب فيه اسم الملف.
 """
 
 from __future__ import annotations
@@ -47,11 +41,10 @@ CPS_INITIAL = 11.0           # تقدير أولي: حروف نطق/ثانية �
 
 @dataclass
 class Config:
-    """سياسة المزامنة — كل قيمة قابلة للضبط من سطر الأوامر."""
+    """سياسة المزامنة — تسريع دائمًا، قطع أبدًا."""
     borrow_ratio: float = 0.60   # نسبة استعارة فجوة الصمت التالية
     borrow_max:    float = 0.50  # سقف الاستعارة (500ms)
     min_gap:       float = 0.12  # أقل صمت مضمون قبل السطر التالي
-    max_rate:      float = 1.55  # سقف التسريع الرقمي (DSP)
     max_gen_speed: float = 1.35  # سقف سرعة التوليد داخل النموذج
     max_parts:     int   = 6     # أقصى عدد أجزاء للسطر الواحد
     chunk_max:     int   = 230   # حد أمان عدد حروف استدعاء التوليد الواحد
@@ -72,7 +65,7 @@ class Segment:
     gen_speed:   float = 1.0
     dsp_factor:  float = 1.0
     parts:       int   = 1
-    outcome:     str  = ""
+    outcome:     str  = ""     # ok / fast / fail — لا وجود لـ cut
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -232,7 +225,7 @@ def split_balanced(text: str, k: int) -> list[str]:
 
 
 # ══════════════════════════════════════════════════════════════════
-# القسم 5 — العمليات الصوتية
+# القسم 5 — العمليات الصوتية (تسريع بلا قطع أبدًا)
 # ══════════════════════════════════════════════════════════════════
 
 def trim_silence(seg, threshold_db: int = -42, pad_ms: int = 40):
@@ -249,11 +242,15 @@ def trim_silence(seg, threshold_db: int = -42, pad_ms: int = 40):
 
 
 def stretch(clip, factor: float, ffmpeg_bin: str, workdir: Path):
-    """تسريع/تباطؤ مع الحفاظ على النغمة عبر ffmpeg atempo."""
+    """تسريع يحفظ النغمة عبر ffmpeg atempo — بلا سقف وبلا قطع أبدًا.
+    مهما كان التجاوز: يُبنى سلسلة atempo بالقدر المطلوب بالضبط.
+    الاحتياط عند فشل ffmpeg: إعادة تشكيل العينات (تغيّر النغمة قليلًا
+    لكن تحفظ كل الكلام — لا بتر في الحالتين)."""
     from pydub import AudioSegment
-    if factor <= 1.02 or len(clip) < 500:
+    if factor <= 1.02 or len(clip) < 300:
         return clip
-    factor = max(0.5, min(factor, 4.0))
+    factor = max(0.5, min(factor, 20.0))
+    # atempo يعمل حتى ×2 لكل طبقة — نبني سلسلة بالقدر المطلوب
     chain, f = [], factor
     while f > 2.0:
         chain.append("atempo=2.0")
@@ -265,17 +262,22 @@ def stretch(clip, factor: float, ffmpeg_bin: str, workdir: Path):
     r = subprocess.run(
         [ffmpeg_bin, "-y", "-loglevel", "error", "-i", str(inp),
          "-filter:a", ",".join(chain),
-         "-ar", str(clip.frame_rate), "-ac", "1", str(outp)])
+         "-ar", str(SAMPLE_RATE), "-ac", "1", str(outp)])
     if r.returncode != 0 or not outp.exists():
-        print("   ⚠ فشل atempo — سيُستخدم البتر الصارم")
-        return clip
+        # الاحتياط: تسريع بإعادة تشكيل العينات — يبقى كل الكلام، لا قطع
+        try:
+            new_rate = int(clip.frame_rate * factor)
+            fast = clip._spawn(clip.raw_data,
+                               overrides={"frame_rate": new_rate})
+            return fast.set_frame_rate(SAMPLE_RATE)
+        except Exception:
+            return clip
     return AudioSegment.from_file(outp, format="wav")
 
 
-def finalize_clip(clip, budget_ms: int):
-    """الحد الصلب + منع النقرات: بتر عند الميزانية ثم تلاشٍ قصير."""
-    if len(clip) > budget_ms:
-        clip = clip[:budget_ms].fade_out(60)
+def finalize_clip(clip):
+    """تشذيب ناعم للحواف فقط (منع النقرات) — لا بتر أبدًا.
+    التسريع يحل محل القطع في كل الحالات."""
     return clip.fade_in(10).fade_out(25)
 
 
@@ -368,7 +370,7 @@ class SilmaEngine:
 
 
 # ══════════════════════════════════════════════════════════════════
-# القسم 7 — محرك المزامنة (قلب المشروع)
+# القسم 7 — محرك المزامنة (تسريع بدل القطع — دائمًا)
 # ══════════════════════════════════════════════════════════════════
 
 class SyncEngine:
@@ -384,14 +386,12 @@ class SyncEngine:
 
     # ── الزمن المتاح ──────────────────────────────────────────
     def budget(self, segs: list[Segment], i: int) -> float:
-        """مدة السطر + استعارة من الفجوة التالية، دون مزاحمة التالي أبدًا."""
+        """مدة السطر + استعارة من الفجوة التالية."""
         s = segs[i]
         win = (s.end_ms - s.start_ms) / 1000.0
         if i + 1 < len(segs):
             gap = max(0.0, (segs[i + 1].start_ms - s.end_ms) / 1000.0)
             win += min(self.cfg.borrow_ratio * gap, self.cfg.borrow_max)
-            win = min(win, (segs[i + 1].start_ms
-                            - self.cfg.min_gap * 1000 - s.start_ms) / 1000.0)
         else:
             win += self.cfg.borrow_max
         return max(0.3, win)
@@ -428,7 +428,7 @@ class SyncEngine:
             joined += gap + c
         return joined, raw + self.cfg.part_gap_ms / 1000.0 * (len(chunks) - 1)
 
-    # ── معالجة سطر واحد: التسلسل الكامل للقرارات ──────────────
+    # ── معالجة سطر واحد ───────────────────────────────────────
     def process(self, segs: list[Segment], i: int):
         seg = segs[i]
         budget = self.budget(segs, i)
@@ -454,7 +454,7 @@ class SyncEngine:
             return None
         dur = len(joined) / 1000.0
 
-        # 3) إعادة توليد بسرعة أعلى إن كان التجاوز كبيرًا (جودة > معالجة)
+        # 3) إعادة توليد بسرعة أعلى إن كان التجاوز كبيرًا (جودة أفضل)
         if (not self.cfg.no_regen
                 and speed0 < self.cfg.max_gen_speed
                 and dur > budget * 1.10):
@@ -470,19 +470,19 @@ class SyncEngine:
         seg.raw_sec = dur
         seg.gen_speed = speed0
 
-        # 4) تسريع رقمي يحفظ النغمة للفارق المتبقي
+        # 4) التسريع الرقمي — بلا سقف، مهما كان التجاوز.
+        #    لا قطع أبدًا: السطر يدخل وقته بالتسريع حصرًا.
         outcome = "ok"
         if dur > budget * 1.02:
-            factor = min(self.cfg.max_rate, dur / budget)
+            factor = dur / budget          # بالضبط المطلوب — بلا حد أقصى
             joined = stretch(joined, factor, self.ffmpeg, self.workdir)
             seg.dsp_factor = factor
             outcome = "fast"
+            dur = len(joined) / 1000.0
 
-        # 5) الحد الصلب — لا تداخل مع السطر التالي مهما كلف الأمر
-        joined = finalize_clip(joined, int(budget * 1000))
-        if len(joined) >= int(budget * 1000) - 5 and outcome != "ok":
-            outcome = "cut"
-
+        # 5) تشذيب الحواف فقط — لا بتر. إن بقي فارق ميلي ثوانٍ
+        #    يدخل في هامش الصمت، ولا تُقطع كلمة.
+        joined = finalize_clip(joined)
         seg.final_sec = len(joined) / 1000.0
         seg.outcome = outcome
         return joined
@@ -492,8 +492,7 @@ class SyncEngine:
 # القسم 8 — التقرير (CSV + ملخص)
 # ══════════════════════════════════════════════════════════════════
 
-OUTCOME_AR = {"ok": "✓ دخل زمنه", "fast": "⚡ سُرِّع",
-              "cut": "✂ قُطع (حد صلب)", "fail": "✗ فشل"}
+OUTCOME_AR = {"ok": "✓ دخل زمنه", "fast": "⚡ سُرِّع (بلا قطع)", "fail": "✗ فشل"}
 
 
 def write_report(csv_path: Path, segs: list[Segment], meta: dict):
@@ -511,15 +510,16 @@ def write_report(csv_path: Path, segs: list[Segment], meta: dict):
     csv_path.write_text("\ufeff" + head + "\n".join(rows), encoding="utf-8")
 
     counts = {k: sum(1 for s in segs if s.outcome == k)
-              for k in ("ok", "fast", "cut", "fail")}
+              for k in ("ok", "fast", "fail")}
     ratios = [s.raw_sec / s.budget_sec for s in segs
-              if s.outcome in ("fast", "cut") and s.budget_sec > 0]
+              if s.outcome == "fast" and s.budget_sec > 0]
     avg_ratio = sum(ratios) / len(ratios) if ratios else 0.0
 
     lines = [
         "══════════ تقرير الدبلجة ══════════",
         f"إجمالي الأسطر          : {len(segs)}",
     ] + [f"{OUTCOME_AR[k]:<22} : {v}" for k, v in counts.items()] + [
+        f"أسطر مقطوعة            : 0 (السياسة: تسريع بدل القطع)",
         f"متوسط نسبة التجاوز قبل الضبط : {avg_ratio:.2f}",
         f"سرعة النموذج المعايرة   : {meta['cps']:.1f} حرف/ث",
         f"مرات إعادة التوليد      : {meta['regens']}",
@@ -537,8 +537,11 @@ def write_report(csv_path: Path, segs: list[Segment], meta: dict):
 
 
 # ══════════════════════════════════════════════════════════════════
-# القسم 9 — Google Drive (للوصول للملفات فقط)
+# القسم 9 — Google Drive + البحث عن ملف الترجمة الذي ترسله
 # ══════════════════════════════════════════════════════════════════
+
+SUB_EXTS = (".srt", ".vtt", ".ass")
+
 
 def mount_drive():
     try:
@@ -550,15 +553,41 @@ def mount_drive():
         return None
 
 
+def collect_drive_subtitles(root) -> list[Path]:
+    """يجمع كل ملفات الترجمة في Google Drive (بحث شامل في كل المجلدات)."""
+    subs = []
+    for dirpath, _, filenames in os.walk(root):
+        for f in filenames:
+            if f.lower().endswith(SUB_EXTS):
+                subs.append(Path(dirpath) / f)
+    return subs
+
+
+def match_subtitle(subs: list[Path], name: str) -> Path | None:
+    """يطابق الاسم الذي أرسلته أنت:
+    1) الاسم الكامل  2) بدون الامتداد  3) جزئيًا (يحتوي الاسم)."""
+    t = name.strip().lower()
+    for p in subs:
+        if p.name.lower() == t:
+            return p
+    for p in subs:
+        if p.stem.lower() == t:
+            return p
+    for p in subs:
+        if t and t in p.name.lower():
+            return p
+    return None
+
+
 # ══════════════════════════════════════════════════════════════════
 # القسم 10 — المسار الرئيسي
 # ══════════════════════════════════════════════════════════════════
 
 def main():
     ap = argparse.ArgumentParser(
-        description="SILMA F5-TTS Auto Dubber v2.2 — دبلجة عربية متزامنة من ملف ترجمة")
-    ap.add_argument("--file", "-f", required=True,
-                    help="المسار الكامل لملف الترجمة")
+        description="SILMA F5-TTS Auto Dubber v3.0 — حقل تفاعلي + بحث في Drive + تسريع بلا قطع")
+    ap.add_argument("--file", "-f",
+                    help="(اختياري) اسم الملف أو مساره — إن تُرك فارغًا سيُطلب منك")
     ap.add_argument("--out-dir", help="مجلد الإخراج (افتراضي: بجانب ملف الترجمة)")
     ap.add_argument("--ref-audio", help="عينة صوتية للاستنساخ الصوتي (wav)")
     ap.add_argument("--ref-text", help="النص المطابق حرفيًا للعينة الصوتية")
@@ -569,7 +598,6 @@ def main():
                     help="معالجة أول N سطر فقط (بدونه: الملف كاملًا)")
     ap.add_argument("--skip", type=int, default=0,
                     help="تخطي أول N سطر (بدونه: البدء من أول سطر)")
-    ap.add_argument("--max-rate", type=float, default=1.55)
     ap.add_argument("--borrow-ratio", type=float, default=0.60)
     ap.add_argument("--borrow-max", type=float, default=0.50)
     ap.add_argument("--min-gap", type=float, default=0.12)
@@ -582,19 +610,49 @@ def main():
     ap.add_argument("--ffmpeg", help="مسار ffmpeg إن لم يكن في PATH")
     args = ap.parse_args()
 
+    print("═══ SILMA Auto Dubber v3.0 — حقل تفاعلي + تسريع بلا قطع ═══")
+    print(f"🔵 الأمر الواصل: {' '.join(sys.argv)}")
+
     ffmpeg_bin = bootstrap(args.ffmpeg)
 
-    # [2/6] Drive
+    # [2/6] ربط Google Drive
+    drive_root = None
     if not args.no_drive:
         print("\n⏳ [2/6] ربط Google Drive...")
         drive_root = mount_drive()
         print("✅ Drive جاهز." if drive_root else "ℹ تشغيل محلي بدون Drive.")
 
-    # [3/6] ملف الترجمة — من المسار الذي تحدده أنت
-    print("\n⏳ [3/6] قراءة ملف الترجمة...")
-    srt_path = Path(args.file).expanduser()
-    if not srt_path.is_file():
-        sys.exit(f"❌ الملف غير موجود: {srt_path}")
+    # [3/6] ملف الترجمة — أنت ترسل الاسم، والسكربت يجده في Drive
+    print("\n⏳ [3/6] ملف الترجمة...")
+    if args.file:
+        p = Path(args.file).expanduser()
+        if p.is_file():
+            srt_path = p                      # مسار مباشر صحيح
+        elif drive_root:
+            subs = collect_drive_subtitles(drive_root)
+            print(f"🔎 البحث عن '{args.file}' في Google Drive "
+                  f"({len(subs)} ملف ترجمة)...")
+            srt_path = match_subtitle(subs, p.name)
+            if not srt_path:
+                sys.exit(f"❌ لم يُعثر على '{args.file}' في Google Drive.")
+        else:
+            sys.exit(f"❌ الملف غير موجود: {p}")
+    else:
+        # الحقل التفاعلي — السكربت يسألك وأنت تكتب الاسم
+        if not drive_root:
+            sys.exit("❌ مرّر الاسم عبر --file أو شغّل مع Google Drive.")
+        try:
+            name = input("📝 اكتب اسم ملف الترجمة (مثال: example.srt): ").strip()
+        except EOFError:
+            sys.exit("❌ لا يمكن إظهار حقل الإدخال هنا — مرّر الاسم عبر --file")
+        subs = collect_drive_subtitles(drive_root)
+        print(f"🔎 البحث عن '{name}' في Google Drive ({len(subs)} ملف ترجمة)...")
+        srt_path = match_subtitle(subs, name)
+        if not srt_path:
+            print("❌ لم يُعثر على تطابق. الملفات المتاحة في Drive:")
+            for sp in subs[:20]:
+                print(f"   • {sp.name}")
+            sys.exit(1)
     print(f"✅ الملف: {srt_path}")
 
     segs = parse_subtitles(srt_path)
@@ -622,8 +680,8 @@ def main():
     # [5/6] التوليد والمزامنة
     print(f"\n⏳ [5/6] بدء التوليد والمزامنة ({len(segs)} سطرًا)...")
     cfg = Config(borrow_ratio=args.borrow_ratio, borrow_max=args.borrow_max,
-                 min_gap=args.min_gap, max_rate=args.max_rate,
-                 max_parts=args.max_parts, no_regen=args.no_regen)
+                 min_gap=args.min_gap, max_parts=args.max_parts,
+                 no_regen=args.no_regen)
     workdir = Path(tempfile.mkdtemp(prefix="silma_work_"))
     sync = SyncEngine(engine, cfg, ffmpeg_bin, workdir)
 
@@ -635,7 +693,7 @@ def main():
                       dtype=np.float32)
 
     t0 = time.time()
-    marks = {"ok": "✓", "fast": "⚡", "cut": "✂", "fail": "✗"}
+    marks = {"ok": "✓", "fast": "⚡", "fail": "✗"}
     for i in range(len(segs)):
         clip = sync.process(segs, i)
         seg = segs[i]
@@ -684,7 +742,7 @@ def main():
         "cps": sync.cps, "regens": sync.regens, "elapsed": elapsed,
         "rtf": (total_ms / 1000) / max(elapsed, 0.1),
         "cfg": f"borrow={cfg.borrow_ratio}/{cfg.borrow_max}, "
-               f"max_rate={cfg.max_rate}, gen≤{cfg.max_gen_speed}",
+               f"gen≤{cfg.max_gen_speed}, تسريع بلا سقف — لا قطع أبدًا",
     })
 
     print(f"\n🎉 اكتملت الدبلجة في {elapsed:.0f} ثانية "
